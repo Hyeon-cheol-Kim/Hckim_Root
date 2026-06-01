@@ -349,11 +349,10 @@ def plot_eye_diagram(ax, data: np.ndarray,
         h_line = f"         H: {h_mv:>5.1f} mV"
         lines.append(w_line)
         lines.append(h_line)
-        lines.append('')
-    margin_text = '\n'.join(lines).rstrip()
+    margin_text = '\n'.join(lines)
 
     ax.text(0.99, 0.99, margin_text, transform=ax.transAxes,
-            fontsize=14, color='yellow', va='top', ha='right',
+            fontsize=17, color='yellow', va='top', ha='right',
             fontfamily='monospace',
             bbox=dict(boxstyle='round,pad=0.5', fc='#1a1a1a',
                       alpha=0.88, ec='yellow', lw=1.0))
