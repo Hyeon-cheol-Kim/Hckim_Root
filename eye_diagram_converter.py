@@ -339,18 +339,21 @@ def plot_eye_diagram(ax, data: np.ndarray,
     ax.axhline(0, color='white', lw=0.8, ls='--', alpha=0.5, zorder=3)
     ax.axvline(0, color='white', lw=0.8, ls='--', alpha=0.5, zorder=3)
 
-    # ── 마스크 마진 정보 박스 (우상단, 가로 정렬) ────────────────
-    # 참고 이미지 스타일: [High] W: x.xxx UI, H: xx.x mV  (가로 한 줄)
+    # ── 마스크 마진 정보 박스 (우상단) ──────────────────────────
     label_map = {'Upper': 'High', 'Middle': 'Mid ', 'Lower': 'Low '}
     lines = []
     for label, w_ui, h_mv in mask_info_list:
         tag = label_map.get(label, label)
-        # W/H 값을 고정폭으로 맞춰 열 정렬
-        lines.append(f"[{tag}]  W: {w_ui:.3f} UI,  H: {h_mv:>5.1f} mV")
-    margin_text = '\n'.join(lines)
+        combined_len = len(f"[{tag}]  W: {w_ui:.3f} UI,  H: {h_mv:>5.1f} mV")
+        w_line = f"[{tag}]  W: {w_ui:.3f} UI".ljust(combined_len)
+        h_line = f"         H: {h_mv:>5.1f} mV"
+        lines.append(w_line)
+        lines.append(h_line)
+        lines.append('')
+    margin_text = '\n'.join(lines).rstrip()
 
     ax.text(0.99, 0.99, margin_text, transform=ax.transAxes,
-            fontsize=11, color='yellow', va='top', ha='right',
+            fontsize=14, color='yellow', va='top', ha='right',
             fontfamily='monospace',
             bbox=dict(boxstyle='round,pad=0.5', fc='#1a1a1a',
                       alpha=0.88, ec='yellow', lw=1.0))
