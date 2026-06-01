@@ -28,6 +28,7 @@ import re
 import os
 import sys
 import numpy as np
+from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.collections import LineCollection
@@ -369,9 +370,42 @@ def plot_eye_diagram(ax, data: np.ndarray,
             bbox=dict(boxstyle='round,pad=0.3', fc='#1a1a1a',
                       alpha=0.75, ec='#444444'))
 
+    return mask_info_list
+
 # ─────────────────────────────────────────────────────────────────
 # 6. 변환 실행
 # ─────────────────────────────────────────────────────────────────
+
+def append_to_db(base_name: str, all_lane_margins: list):
+    """
+    EOM_DB.csv 에 한 줄 추가.
+    all_lane_margins : [(lane_name, mask_info_list), ...]
+      mask_info_list : [('Upper', w, h), ('Middle', w, h), ('Lower', w, h)]
+    한 줄 형식:
+      datetime, input_file, l0_up_w, l0_up_h, l0_mid_w, l0_mid_h, l0_low_w, l0_low_h,
+                            l1_up_w, l1_up_h, l1_mid_w, l1_mid_h, l1_low_w, l1_low_h
+    """
+    db_path   = os.path.join(os.getcwd(), 'EOM_DB.csv')
+    write_hdr = not os.path.exists(db_path)
+
+    header_lane = ['up_w(UI)', 'up_h(mV)', 'mid_w(UI)', 'mid_h(mV)', 'low_w(UI)', 'low_h(mV)']
+    header = ['datetime', 'input_file']
+    for lane_name, _ in all_lane_margins:
+        header += [f'{lane_name}_{col}' for col in header_lane]
+
+    row = [datetime.now().strftime('%Y%m%d%H%M%S'), base_name]
+    for _, mask_info_list in all_lane_margins:
+        for _, w_ui, h_mv in mask_info_list:
+            row += [f'{w_ui:.4f}', f'{h_mv:.2f}']
+
+    with open(db_path, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        if write_hdr:
+            writer.writerow(header)
+        writer.writerow(row)
+
+    print(f"  → DB 저장: {db_path}")
+
 
 def convert(txt_path: str, csv_paths: list, out_dir: str = None, dpi: int = 150):
     """
@@ -389,6 +423,8 @@ def convert(txt_path: str, csv_paths: list, out_dir: str = None, dpi: int = 150)
     base_name = re.sub(r'_QC_Offsets$', '',
                        os.path.splitext(os.path.basename(txt_path))[0])
 
+    all_lane_margins = []
+
     for csv_path in csv_paths:
         lane_name, x_idx, y_idx, data = parse_eye_csv(csv_path)
         x_coords = calc_x_coords(x_idx, params)
@@ -398,7 +434,7 @@ def convert(txt_path: str, csv_paths: list, out_dir: str = None, dpi: int = 150)
               f"Y: {y_coords[0]:.1f} ~ {y_coords[-1]:.1f} mV")
 
         fig, ax = plt.subplots(figsize=(10, 9), facecolor='#0d0d0d')
-        plot_eye_diagram(ax, data, x_coords, y_coords, lane_name, params)
+        mask_info_list = plot_eye_diagram(ax, data, x_coords, y_coords, lane_name, params)
         plt.tight_layout()
 
         out_path = os.path.join(out_dir, f'{base_name}_{lane_name}.png')
@@ -407,6 +443,9 @@ def convert(txt_path: str, csv_paths: list, out_dir: str = None, dpi: int = 150)
         plt.close(fig)
         print(f"  → 저장: {out_path}")
 
+        all_lane_margins.append((lane_name, mask_info_list))
+
+    append_to_db(base_name, all_lane_margins)
     print("\n완료!")
 
 
