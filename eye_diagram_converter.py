@@ -344,17 +344,17 @@ def plot_eye_diagram(ax, data: np.ndarray,
     lines = []
     for label, w_ui, h_mv in mask_info_list:
         tag = label_map.get(label, label)
-        combined_len = len(f"[{tag}]  W: {w_ui:.3f} UI,  H: {h_mv:>5.1f} mV")
-        w_line = f"[{tag}]  W: {w_ui:.3f} UI".ljust(combined_len)
-        h_line = f"         H: {h_mv:>5.1f} mV"
+        combined_len = len(f"[{tag}] W:{w_ui:.3f}UI  H:{h_mv:>5.1f}mV")
+        w_line = f"[{tag}] W:{w_ui:.3f}UI".ljust(combined_len)
+        h_line = f"       H:{h_mv:>5.1f}mV"
         lines.append(w_line)
         lines.append(h_line)
     margin_text = '\n'.join(lines)
 
     ax.text(0.99, 0.99, margin_text, transform=ax.transAxes,
-            fontsize=17, color='yellow', va='top', ha='right',
+            fontsize=20, color='yellow', va='top', ha='right',
             fontfamily='monospace',
-            bbox=dict(boxstyle='round,pad=0.5', fc='#1a1a1a',
+            bbox=dict(boxstyle='square,pad=0.2', fc='#1a1a1a',
                       alpha=0.88, ec='yellow', lw=1.0))
 
     # ── 파라미터 정보 박스 (좌하단) ─────────────────────────────
