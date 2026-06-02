@@ -340,12 +340,12 @@ def plot_eye_diagram(ax, data: np.ndarray,
     ax.axvline(0, color='white', lw=0.8, ls='--', alpha=0.5, zorder=3)
 
     # ── 마스크 마진 정보 박스 (우상단) ──────────────────────────
-    label_map = {'Upper': 'High', 'Middle': 'Mid ', 'Lower': 'Low '}
+    label_map = {'Upper': 'H', 'Middle': 'M', 'Lower': 'L'}
     lines = []
     for label, w_ui, h_mv in mask_info_list:
         tag = label_map.get(label, label)
-        w_line = f"[{tag}] W:{w_ui:.3f}UI"
-        h_line = f"       H:{h_mv:>5.1f}mV"
+        w_line = f"[{tag}]W:{w_ui:.3f}UI"
+        h_line = f"   H:{h_mv:>5.1f}mV"
         lines.append(w_line)
         lines.append(h_line)
     margin_text = '\n'.join(lines)
