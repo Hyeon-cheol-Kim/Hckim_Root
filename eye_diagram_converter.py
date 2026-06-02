@@ -344,8 +344,7 @@ def plot_eye_diagram(ax, data: np.ndarray,
     lines = []
     for label, w_ui, h_mv in mask_info_list:
         tag = label_map.get(label, label)
-        combined_len = len(f"[{tag}] W:{w_ui:.3f}UI  H:{h_mv:>5.1f}mV")
-        w_line = f"[{tag}] W:{w_ui:.3f}UI".ljust(combined_len)
+        w_line = f"[{tag}] W:{w_ui:.3f}UI"
         h_line = f"       H:{h_mv:>5.1f}mV"
         lines.append(w_line)
         lines.append(h_line)
