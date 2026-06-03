@@ -123,14 +123,14 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         parse_eom_final_package(sys.argv[1])
     else:
-        print("탐색 중: EOM_ 폴더 내의 EOM_ 파일들...")
-        eom_folders = [d for d in glob.glob('EOM_*') if os.path.isdir(d)]
+        print("탐색 중: EOM 폴더 내의 EOM 파일들...")
+        eom_folders = [d for d in glob.glob('EOM*') if os.path.isdir(d)]
         if not eom_folders:
-            print("현재 경로에 'EOM_'로 시작하는 폴더가 없습니다.")
+            print("현재 경로에 'EOM'으로 시작하는 폴더가 없습니다.")
         else:
             for folder in eom_folders:
                 print(f"\n[폴더 진입] {folder}")
-                target_files = glob.glob(os.path.join(folder, 'EOM_*'))
+                target_files = glob.glob(os.path.join(folder, 'EOM*'))
                 for file_path in target_files:
                     fname = os.path.basename(file_path)
                     # 결과 파일 중복 처리 방지
