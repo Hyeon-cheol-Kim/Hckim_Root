@@ -17,9 +17,14 @@ def ensure_utf8_encoding(file_path):
         detected = chardet.detect(raw_data)
         encoding = detected['encoding']
 
-        # 이미 UTF-8이거나 ASCII인 경우 변환 없이 진행
-        if encoding and encoding.lower() in ['utf-8', 'ascii']:
+        # 이미 UTF-8이거나 ASCII인 경우 변환 없이 진행 (utf-8-sig = BOM 있는 UTF-8도 포함)
+        if encoding and encoding.lower() in ['utf-8', 'ascii', 'utf-8-sig']:
             return True
+
+        # chardet가 인코딩 감지 실패 시 처리 불가
+        if encoding is None:
+            print(f"  [인코딩 변환 실패] 인코딩을 감지할 수 없습니다.")
+            return False
 
         # UTF-8 변환 작업 진행
         print(f"  [인코딩 변환] {encoding} -> UTF-8 변환 중...")
@@ -83,13 +88,13 @@ def parse_eom_final_package(input_path):
     if not lane_data:
         return
 
-    base_dir = os.path.dirname(input_path)
+    base_dir = os.path.dirname(os.path.abspath(input_path))
     file_name_only = os.path.splitext(os.path.basename(input_path))[0]
 
     # 1. Result_입력파일명_QC_Offsets.txt 생성
+    existing_lanes = sorted(lane_data.keys())
     offset_path = os.path.join(base_dir, f"Result_{file_name_only}_QC_Offsets.txt")
     with open(offset_path, 'w', encoding='utf-8') as f:
-        existing_lanes = sorted(lane_data.keys())
         if 0 in existing_lanes and 1 in existing_lanes:
             f.write("DualLane\n")
         elif 0 in existing_lanes:
