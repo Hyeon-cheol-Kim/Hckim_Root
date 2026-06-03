@@ -140,6 +140,27 @@ def find_mask_center(data: np.ndarray,
     return cx, cy
 
 
+def _contiguous_cluster(values: np.ndarray, target: float, step: float):
+    """
+    정렬된 values 중에서 target을 포함하는 연속 클러스터 반환.
+    인접 값 간격이 2*step 초과이면 클러스터 경계로 판단.
+    """
+    if len(values) == 0:
+        return None
+    sorted_v = np.sort(values)
+    if len(sorted_v) == 1:
+        return sorted_v if abs(sorted_v[0] - target) <= step else None
+    gaps = np.diff(sorted_v)
+    split_pts = np.where(gaps > 2 * step)[0] + 1
+    clusters = np.split(sorted_v, split_pts)
+    for c in clusters:
+        if c.min() <= target <= c.max():
+            return c
+    # target이 어떤 클러스터에도 포함되지 않으면 가장 가까운 클러스터 반환
+    closest = min(clusters, key=lambda c: min(abs(c - target)))
+    return closest
+
+
 def calc_mask_margin(data: np.ndarray,
                      x_coords: np.ndarray,
                      y_coords: np.ndarray,
@@ -147,32 +168,35 @@ def calc_mask_margin(data: np.ndarray,
                      y_min_mv: float, y_max_mv: float):
     """
     마스크 중심점(cx, cy) 기준으로 해당 Eye 영역 안에서만 계산.
-    - Width  : cy 행에서 0인 셀들의 (max_x - min_x) → UI
-    - Height : cx 열에서 해당 Eye 영역(y_min_mv~y_max_mv) 안의
-               0인 행들의 (max_y - min_y) → mV
+    - Width  : cy 행에서 cx를 포함하는 연속 0값 클러스터의 x 범위 → UI
+    - Height : cx 열에서 cy를 포함하는 연속 0값 클러스터의 y 범위 → mV
     반환: (width_ui, height_mv)
     """
-    x_arr = np.array(x_coords)
-    y_arr = np.array(y_coords)
+    x_arr  = np.array(x_coords)
+    y_arr  = np.array(y_coords)
+    step_x = float(abs(x_arr[1] - x_arr[0])) if len(x_arr) > 1 else 1.0
+    step_y = float(abs(y_arr[1] - y_arr[0])) if len(y_arr) > 1 else 1.0
 
-    # Width: cy에 가장 가까운 행에서 0인 셀의 x 범위
-    row_idx  = int(np.argmin(np.abs(y_arr - cy)))
-    zero_x   = x_arr[data[row_idx, :] == 0]
-    if len(zero_x) >= 2:
-        width_ui = float(zero_x.max() - zero_x.min())
-    elif len(zero_x) == 1:
-        width_ui = float((x_arr[-1] - x_arr[0]) / (len(x_arr) - 1))
+    # Width: cy에 가장 가까운 행에서 cx 포함 연속 클러스터
+    row_idx = int(np.argmin(np.abs(y_arr - cy)))
+    zero_x  = x_arr[data[row_idx, :] == 0]
+    cluster_x = _contiguous_cluster(zero_x, cx, step_x)
+    if cluster_x is not None and len(cluster_x) >= 2:
+        width_ui = float(cluster_x.max() - cluster_x.min())
+    elif cluster_x is not None:
+        width_ui = step_x
     else:
         width_ui = 0.0
 
-    # Height: cx에 가장 가까운 열에서 해당 Eye 영역 안의 0인 행 y 범위
+    # Height: cx에 가장 가까운 열에서 cy 포함 연속 클러스터 (해당 Eye 영역 내)
     col_idx     = int(np.argmin(np.abs(x_arr - cx)))
     region_mask = (y_arr >= y_min_mv) & (y_arr <= y_max_mv)
     col_zeros_y = y_arr[(data[:, col_idx] == 0) & region_mask]
-    if len(col_zeros_y) >= 2:
-        height_mv = float(col_zeros_y.max() - col_zeros_y.min())
-    elif len(col_zeros_y) == 1:
-        height_mv = float(abs(y_arr[1] - y_arr[0]))
+    cluster_y = _contiguous_cluster(col_zeros_y, cy, step_y)
+    if cluster_y is not None and len(cluster_y) >= 2:
+        height_mv = float(cluster_y.max() - cluster_y.min())
+    elif cluster_y is not None:
+        height_mv = step_y
     else:
         height_mv = 0.0
 
