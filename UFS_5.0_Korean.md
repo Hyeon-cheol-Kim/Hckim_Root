@@ -23,6 +23,8 @@
 13. [오류 처리](#13-오류-처리)
 14. [UFS 5.0 주요 변경사항](#14-ufs-50-주요-변경사항)
 15. [UFS 4.1 vs UFS 5.0 상세 비교](#15-ufs-41-vs-ufs-50-상세-비교)
+16. [MIPI M-PHY v6.0 규격](#16-mipi-m-phy-v60-규격)
+17. [MIPI UniPro v3.0 규격](#17-mipi-unipro-v30-규격)
 
 ---
 
@@ -1085,15 +1087,584 @@ UFS 5.0에서 선택적으로 도입된 Zoned Storage는 낸드 플래시 특성
 
 ---
 
+## 16. MIPI M-PHY v6.0 규격
+
+### 16.1 개요
+
+MIPI M-PHY(Mobile Physical Layer)는 MIPI Alliance가 제정한 모바일·임베디드 환경용 고속 직렬 물리 계층 규격이다. UFS, MIPI CSI-2, MIPI DSI 등 다양한 인터페이스의 물리 계층으로 사용된다.
+
+**M-PHY v6.0**은 UFS 5.0의 HS-G6 동작을 뒷받침하는 물리 계층 규격으로, 이전 버전(v5.0, HS-G5 NRZ)과 비교해 **PAM4 신호 방식, RS-FEC, DSP 기반 적응형 등화기**를 핵심 변경사항으로 도입했다.
+
+| 규격 | 버전 | 주요 기어 | 신호 방식 | 관련 UFS |
+|------|------|----------|----------|---------|
+| M-PHY v3.x | Gen 3 | HS-G3 | NRZ | UFS 2.x |
+| M-PHY v4.x | Gen 4 | HS-G4 | NRZ | UFS 3.x |
+| M-PHY v5.0 | Gen 5 | HS-G5 | NRZ | UFS 4.x |
+| **M-PHY v6.0** | **Gen 6** | **HS-G6** | **PAM4** | **UFS 5.0** |
+
+---
+
+### 16.2 HS-G6 전기적 특성
+
+#### 16.2.1 신호 레벨 정의
+
+PAM4는 4개의 전압 레벨(V0~V3)을 사용하여 심볼당 2비트를 인코딩한다.
+
+```
+전압
+ ▲
+ │  V3 ─────────────────  (11)  ← 최상위
+ │       ↕ Eye 2 (상단)
+ │  V2 ─────────────────  (10)
+ │       ↕ Eye 1 (중단)
+ │  V1 ─────────────────  (01)
+ │       ↕ Eye 0 (하단)
+ │  V0 ─────────────────  (00)  ← 최하위
+ └──────────────────────→ 시간
+```
+
+| 파라미터 | 심볼 | 값 | 설명 |
+|----------|------|-----|------|
+| 전체 차동 진폭 | VSWING | 200 mVpp (typ) | V3 - V0 |
+| 레벨 간격 | ΔVLEVEL | ~67 mVpp (VSWING/3) | 균등 분할 |
+| 공통 모드 전압 | VCM | 0 ~ 0.7 V | 동일 |
+| 차동 임피던스 | ZDIFF | 100 Ω | 동일 |
+| 레벨 선형성(RLM) | RLM | < ±3% | 4레벨 균등도 |
+
+> **RLM(Relative Level Mismatch)**: PAM4 레벨 간격의 균등도. 비선형이면 Eye 크기가 불균일해져 BER이 악화된다.
+
+#### 16.2.2 HS-G6 타이밍 사양
+
+| 파라미터 | 값 | 설명 |
+|----------|-----|------|
+| 보 레이트 (Baud Rate) | 23.2 Gbaud | HS-G5와 동일한 보 레이트 |
+| 유효 비트 레이트 | 46.4 Gbps | PAM4로 2배 (per lane) |
+| UI (Unit Interval) | ~43.1 ps | 1 / 23.2 Gbaud |
+| 지터 (RJ, 1σ) | < 0.01 UI | 랜덤 지터 |
+| 지터 (DJ, p-p) | < 0.1 UI | 결정론적 지터 |
+| 수신 타이밍 마진 | > 0.15 UI (각 eye) | 3개 eye 각각 |
+
+---
+
+### 16.3 FEC (Forward Error Correction)
+
+#### 16.3.1 FEC 코드 방식
+
+M-PHY v6.0은 PAM4 신호의 SNR 감소를 보상하기 위해 **KP4 RS-FEC(Reed-Solomon Forward Error Correction)**를 채택한다.
+
+| 파라미터 | 값 | 설명 |
+|----------|-----|------|
+| FEC 방식 | RS(544, 514) — KP4 | GF(2¹⁰) 기반 Reed-Solomon |
+| 코드율 (Code Rate) | 514/544 ≈ 0.945 | 오버헤드 ~5.5% |
+| 심볼 크기 | 10비트 | GF(2¹⁰) |
+| 코드워드 길이 | 544 심볼 = 5,440 비트 | |
+| 데이터 심볼 수 | 514 심볼 | |
+| 패리티 심볼 수 | 30 심볼 | 오류 정정 능력 |
+| 정정 능력 | 최대 15 심볼 오류/코드워드 | t = 15 |
+| Pre-FEC BER 허용치 | < 2.4 × 10⁻⁴ | KP4 입력 한계 |
+| Post-FEC BER 목표 | < 10⁻¹⁵ | 스토리지 요구 수준 |
+
+#### 16.3.2 FEC 처리 흐름
+
+```
+TX 경로:
+원본 비트 스트림 (514심볼 단위)
+       ↓
+RS 인코더: 30심볼 패리티 생성
+       ↓
+코드워드 (544심볼) → 인터리버 → PAM4 변조 → 전송
+
+RX 경로:
+수신 신호 → PAM4 복조 (등화기 통과)
+       ↓
+디인터리버
+       ↓
+RS 디코더: 오류 위치·크기 계산 → 15심볼까지 정정
+       ↓
+정정된 514심볼 → 상위 계층(UniPro PA)으로 전달
+```
+
+#### 16.3.3 인터리빙 (Interleaving)
+
+버스트 오류(연속된 오류)를 분산시켜 RS-FEC의 랜덤 오류 정정 능력을 최대한 활용한다.
+
+- **인터리브 깊이**: 4코드워드 이상
+- **효과**: 20비트 이상의 연속 오류를 각 코드워드에 1~2비트씩 분산
+- **지연 비용**: 인터리브 깊이 × 코드워드 크기 만큼 지연 추가
+
+---
+
+### 16.4 DSP 기반 적응형 등화기
+
+PAM4에서 채널 손실(삽입 손실, 반사 손실, 크로스토크)을 보상하기 위해 TX·RX 양측에 등화기가 필수 적용된다.
+
+#### 16.4.1 TX 등화기: FFE (Feed-Forward Equalizer)
+
+송신 측에서 전송 전에 신호를 미리 왜곡시켜 채널 주파수 응답의 역함수를 적용한다.
+
+```
+FFE 구조 (3-탭 예시):
+입력 x[n]
+  ├─[지연]→ x[n-1] ×c₋₁  ─┐
+  ├────────→ x[n]   ×c₀   ─┼─(합산)→ 출력 y[n]
+  └─[지연]→ x[n+1] ×c₊₁  ─┘
+
+c₋₁: 사전 커서(pre-cursor) 탭
+c₀:  메인 탭
+c₊₁: 사후 커서(post-cursor) 탭
+```
+
+| 파라미터 | M-PHY v5.0 | M-PHY v6.0 |
+|----------|------------|------------|
+| FFE 탭 수 | 최소 3탭 | **최소 5탭** |
+| 탭 해상도 | 6비트 | **8비트** |
+| 적응 알고리즘 | 고정 또는 LMS | **LMS / MMSE 적응형** |
+
+#### 16.4.2 RX 등화기: CTLE + DFE
+
+수신 측에서 아날로그 CTLE로 1차 보상 후, 디지털 DFE로 ISI(심볼 간 간섭)를 제거한다.
+
+```
+RX 신호 처리 체인:
+PAM4 수신 신호
+    ↓
+[CTLE] 연속시간 선형 등화기 (아날로그)
+  - 고주파 손실 보상
+  - 피킹(peaking) 주파수: Nyquist 주파수 근방
+    ↓
+[ADC] 아날로그-디지털 변환 (PAM4: 4레벨 슬라이서)
+    ↓
+[DFE] 결정 피드백 등화기 (디지털)
+  - 이전 심볼 판정값으로 현재 ISI 제거
+  - 탭 수: 최소 5탭
+    ↓
+[PAM4 판정] 3개 슬라이싱 레벨로 2비트 복원
+    ↓
+FEC 디코더로 전달
+```
+
+#### 16.4.3 적응 시퀀스 (Link Training)
+
+링크 초기화 중 양측 등화기의 최적 계수(탭 값)를 자동으로 결정하는 과정이다.
+
+```
+Phase 1: TX Preset 적용
+  - 사전 정의된 탭 설정(Preset) 중 하나를 초기값으로 사용
+
+Phase 2: RX CTLE 적응
+  - PRBS (Pseudo-Random Bit Sequence) 패턴 송신
+  - RX에서 눈 개구부 측정 → CTLE 계수 조정
+
+Phase 3: TX FFE 협상
+  - RX가 상태 보고 (Eye 품질 지표: FOM, Figure of Merit)
+  - TX가 FFE 탭 값을 반복 조정 (Coefficient Update 프로세스)
+
+Phase 4: RX DFE 적응
+  - TX 고정 후 RX DFE 탭 최적화
+
+Phase 5: 수렴 확인 및 FEC 활성화
+  - Pre-FEC BER < 2.4×10⁻⁴ 확인
+  - FEC ON → 정상 데이터 전송 시작
+```
+
+---
+
+### 16.5 전력 모드
+
+M-PHY v6.0은 이전 버전의 전력 모드를 유지하면서 PAM4 관련 절전 동작을 추가했다.
+
+| 전력 상태 | 설명 | DSP/등화기 상태 | 복귀 시간 |
+|----------|------|----------------|----------|
+| HS Active (HS-G6) | PAM4 고속 전송 | 완전 동작 | N/A |
+| HS Active (HS-G1~G5) | NRZ 저속 폴백 | 부분 비활성 | N/A |
+| STALL | 전송 일시 정지, 링크 유지 | 저전력 모드 | < 1 µs |
+| HIBERN8 | 링크 비활성, PHY 정지 | 오프 | ~1 ms |
+| OFF | 완전 전원 차단 | 오프 | 재초기화 필요 |
+
+> **PAM4 추가 고려**: HS-G6 → HIBERN8 진입 시 등화기 계수를 비휘발성 레지스터에 저장하여 복귀 시 재적응(retraining) 시간을 단축할 수 있다.
+
+---
+
+### 16.6 인코딩 방식
+
+| 기어 범위 | 인코딩 | 오버헤드 | 목적 |
+|----------|--------|---------|------|
+| HS-G1 ~ G3 | 8b/10b | 20% | DC 밸런스, 클록 복원 |
+| HS-G4 ~ G5 | 128b/132b | ~3% | 오버헤드 감소 |
+| **HS-G6** | **128b/132b + RS-FEC** | ~8.5% (FEC 포함) | 오류 정정 추가 |
+
+---
+
+### 16.7 M-PHY v5.0 vs v6.0 비교
+
+| 항목 | M-PHY v5.0 | M-PHY v6.0 |
+|------|------------|------------|
+| 최고 기어 | HS-G5 | **HS-G6** |
+| 신호 방식 | NRZ (2레벨) | **PAM4 (4레벨)** |
+| 레인당 최대 속도 | 23.2 Gbps | **46.4 Gbps** |
+| FEC | 없음 | **RS(544,514) 필수** |
+| TX 등화기 | FFE 3탭 (선택) | **FFE 5탭 (필수)** |
+| RX 등화기 | CTLE (선택) | **CTLE + DFE (필수)** |
+| 링크 트레이닝 | 간소화 | **적응형 트레이닝 필수** |
+| Eye 개수 | 1개 (NRZ) | **3개 (PAM4)** |
+| Eye 높이 | VSWING/2 기준 | **VSWING/6 기준 (×3 eye)** |
+| RLM 요구사항 | N/A | **< ±3%** |
+| ADC 분해능 | 불필요 | **최소 6비트 (RX슬라이서)** |
+| 전력 소비 (PHY) | 기준 | 증가 (DSP 추가) |
+
+---
+
+## 17. MIPI UniPro v3.0 규격
+
+### 17.1 개요
+
+MIPI UniPro(Unified Protocol)는 M-PHY 위에서 동작하는 데이터 링크·네트워크 계층 규격이다. 패킷 기반 전송, 흐름 제어, 오류 복구, 장치 관리(DME)를 담당한다.
+
+**UniPro v3.0**은 M-PHY v6.0(HS-G6, PAM4)의 고대역폭을 효율적으로 활용하고, UFS 5.0의 큐 깊이 256, 강화된 QoS, 확장된 보안 기능을 지원하기 위해 이전 버전(v2.0) 대비 다음과 같은 항목을 개선했다.
+
+| 계층 | UniPro 담당 범위 |
+|------|----------------|
+| PHY Adapter (PA) | M-PHY 제어, 기어/모드 협상, DME 인터페이스 |
+| Data Link (DL, L2) | 프레임 생성·파싱, 흐름 제어, ARQ |
+| Network (N, L3) | 주소 지정, 라우팅 |
+| Transport (T, L4) | 세그멘테이션, 재조립, CPort 관리 |
+
+---
+
+### 17.2 계층별 구조
+
+```
+┌──────────────────────────────────────────────────────┐
+│              상위 계층 (UTP / UFS)                    │
+├──────────────────────────────────────────────────────┤
+│  Transport Layer (T-SAP)                              │
+│  세그멘테이션 / 재조립 / CPort 관리                    │
+├──────────────────────────────────────────────────────┤
+│  Network Layer (N-SAP)                                │
+│  DeviceID / Traffic Class / QoS                       │
+├──────────────────────────────────────────────────────┤
+│  Data Link Layer (DL-SAP)                             │
+│  프레이밍 / CRC / 흐름 제어(FC) / ARQ                 │
+├──────────────────────────────────────────────────────┤
+│  PHY Adapter Layer (PA-SAP)                           │
+│  M-PHY 기어 협상 / PAM4 설정 / FEC 제어               │
+├──────────────────────────────────────────────────────┤
+│  M-PHY v6.0 (물리 계층)                               │
+└──────────────────────────────────────────────────────┘
+```
+
+---
+
+### 17.3 PHY Adapter (PA) 계층
+
+PA 계층은 UniPro와 M-PHY 사이의 브리지 역할을 하며, DME(Device Management Entity)를 통해 M-PHY의 동작 파라미터를 제어한다.
+
+#### 17.3.1 PA 계층 신규 기능 (v3.0)
+
+| 기능 | 설명 |
+|------|------|
+| HS-G6 협상 | 링크 초기화 시 PA_ActiveTxDataLanes, PA_TxGear = 6 설정 |
+| PAM4 활성화 | `PA_PAM4Enable` 속성으로 PAM4/NRZ 전환 제어 |
+| FEC 제어 | `PA_FECEnable` 속성으로 RS-FEC 활성화/비활성화 |
+| 등화기 프리셋 | `PA_TxEqualizationPreset`, `PA_RxEqualizationMode` |
+| 트레이닝 상태 | `PA_LinkTrainingStatus` — 적응형 트레이닝 진행 상태 |
+| RLM 모니터링 | `PA_RLMStatus` — PAM4 레벨 선형성 실시간 모니터링 |
+| Pre-FEC BER | `PA_PreFECBERMonitor` — FEC 입력 BER 측정 값 |
+
+#### 17.3.2 주요 PA DME 속성 (v3.0 신규·변경)
+
+| 속성명 | IDN | R/W | 설명 |
+|--------|-----|-----|------|
+| PA_TxGear | 0x1568 | R/W | TX 기어 (1~6) |
+| PA_RxGear | 0x1583 | R/W | RX 기어 (1~6) |
+| PA_PAM4Enable | 0x15A0 | R/W | PAM4 활성화 (0: NRZ, 1: PAM4) |
+| PA_FECEnable | 0x15A1 | R/W | RS-FEC 활성화 |
+| PA_TxEqualizationPreset | 0x15A2 | R/W | TX FFE 프리셋 인덱스 (0~15) |
+| PA_RxEqualizationMode | 0x15A3 | R/W | RX CTLE/DFE 적응 모드 |
+| PA_LinkTrainingStatus | 0x15A4 | RO | 링크 트레이닝 완료/진행 상태 |
+| PA_PreFECBERMonitor | 0x15A5 | RO | Pre-FEC BER 측정값 |
+| PA_ActiveTxDataLanes | 0x1560 | R/W | 활성 TX 레인 수 (1~2) |
+| PA_ActiveRxDataLanes | 0x1580 | R/W | 활성 RX 레인 수 (1~2) |
+| PA_AvailTxDataLanes | 0x1520 | RO | 지원 TX 레인 수 |
+| PA_MaxRxHSGear | 0x1587 | RO | 최대 RX HS 기어 |
+| PA_HibernatEnterDelay | 0x15A8 | R/W | HIBERN8 진입 지연 (µs) |
+
+---
+
+### 17.4 Data Link (DL) 계층
+
+#### 17.4.1 프레임 구조
+
+UniPro DL 계층은 데이터를 **PDU(Protocol Data Unit)** 단위로 캡슐화한다.
+
+```
+DL 프레임 (FC PDU) 구조:
+┌────────┬────────┬───────────────────────┬─────────┐
+│  SOF   │ Header │      Payload          │   CRC   │
+│ (2 B)  │ (4 B)  │ (0 ~ 최대 크기)        │ (4 B)  │
+└────────┴────────┴───────────────────────┴─────────┘
+
+Header 필드:
+ - CPortID (연결 포트 번호)
+ - FCT / ACK 플래그
+ - SeqNum (시퀀스 번호)
+ - 프레임 유형 (Data / Flow Control / ACK)
+```
+
+#### 17.4.2 CRC 강화 (v3.0)
+
+| 항목 | UniPro v2.0 | UniPro v3.0 |
+|------|-------------|-------------|
+| CRC 방식 | CRC-16 | **CRC-32C (Castagnoli)** |
+| 검출 능력 | 최대 16비트 버스트 오류 | **최대 32비트, 랜덤 오류 검출 향상** |
+| 오버헤드 | 2바이트/프레임 | **4바이트/프레임** |
+
+> HS-G6의 높은 전송 속도에서 더 강력한 오류 검출이 요구됨에 따라 CRC-32C로 강화됐다.
+
+#### 17.4.3 흐름 제어 (Flow Control)
+
+UniPro는 **크레딧 기반 흐름 제어**를 사용한다. v3.0에서는 고대역폭 환경에서 크레딧 부족으로 인한 전송 정지(Stall)를 방지하기 위해 크레딧 카운터와 버퍼 크기를 확장했다.
+
+| 항목 | UniPro v2.0 | UniPro v3.0 |
+|------|-------------|-------------|
+| 최대 크레딧 수 | 32,767 (15비트) | **65,535 (16비트)** |
+| 크레딧 단위 | 128 바이트 | **256 바이트 (선택 가능)** |
+| 최대 수신 버퍼 | ~4 MB | **~16 MB** |
+| FC 갱신 주기 | 크레딧 소비 시 | **주기적 + 소비 시 혼합** |
+
+**크레딧 부족 방지 계산 예시 (HS-G6 x2):**
+```
+링크 속도: 92.8 Gbps = 11,600 MB/s
+RTT (왕복 지연): ~2 µs (HIBERN8 없는 경우)
+필요 버퍼 = 11,600 MB/s × 2 µs = ~23 KB
+→ v3.0의 16 MB 버퍼는 충분한 여유 제공
+```
+
+#### 17.4.4 ARQ (Automatic Repeat reQuest)
+
+| 항목 | UniPro v2.0 | UniPro v3.0 |
+|------|-------------|-------------|
+| 재전송 방식 | Selective Repeat ARQ | 동일 |
+| 윈도우 크기 | 최대 8 프레임 | **최대 32 프레임** |
+| 재전송 타이머 | 고정 | **동적 조정 (RTT 기반)** |
+| NAK 즉시 재전송 | 지원 | 지원 (지연 최소화) |
+
+---
+
+### 17.5 Network (N) 계층
+
+#### 17.5.1 주소 체계
+
+| 항목 | 설명 |
+|------|------|
+| DeviceID | 0~7 (3비트, 동일) |
+| CPortID | 0~31 → **0~63으로 확장 (v3.0)** |
+| Traffic Class | TC0 (일반), TC1 (고우선순위) → **TC0~TC3 (4단계, v3.0)** |
+
+#### 17.5.2 QoS (Quality of Service) — v3.0 신규
+
+UniPro v3.0은 **4개의 트래픽 클래스(TC0~TC3)**를 정의하여 레이턴시 민감 트래픽(차량용 안전 데이터, 실시간 I/O)과 대역폭 중심 트래픽(대용량 파일 전송)을 분리 처리한다.
+
+| 트래픽 클래스 | 우선순위 | 용도 |
+|-------------|---------|------|
+| TC0 | 최하 | 백그라운드 벌크 전송 |
+| TC1 | 보통 | 일반 I/O |
+| TC2 | 높음 | 레이턴시 민감 I/O |
+| TC3 | 최고 | 차량용 기능 안전(ASIL) 데이터, 긴급 명령 |
+
+```
+TC별 큐 스케줄러 (WFQ + Strict Priority):
+TC3 ─→ [엄격 우선] ─┐
+TC2 ─→ [가중치 큐]  ─┼─→ PA 계층 TX
+TC1 ─→ [가중치 큐]  ─┤
+TC0 ─→ [가중치 큐]  ─┘
+```
+
+---
+
+### 17.6 Transport (T) 계층
+
+#### 17.6.1 세그멘테이션 및 재조립
+
+상위 계층(UTP)에서 내려오는 대형 UPIU를 DL 계층의 최대 프레임 크기에 맞게 분할(세그멘테이션)하고, 수신 측에서 재조립한다.
+
+| 항목 | UniPro v2.0 | UniPro v3.0 |
+|------|-------------|-------------|
+| 최대 SDU 크기 | 32 KB | **256 KB** |
+| 세그먼트 번호 비트 | 12비트 | **16비트** |
+
+#### 17.6.2 CPort 관리 확장
+
+| 항목 | UniPro v2.0 | UniPro v3.0 |
+|------|-------------|-------------|
+| 최대 CPort 수 | 32 | **64** |
+| CPort 연결 유형 | 단방향, 양방향 | 동일 |
+| CPort 당 트래픽 클래스 | TC0/TC1 | **TC0~TC3** |
+| CPort 격리 | 기본 | **강화 (보안 격리 속성 추가)** |
+
+---
+
+### 17.7 DME (Device Management Entity)
+
+DME는 UniPro 스택의 모든 계층 파라미터를 호스트·장치 소프트웨어가 읽고 쓸 수 있는 **속성(Attribute) 데이터베이스**이다.
+
+#### 17.7.1 DME 접근 절차
+
+```
+호스트 소프트웨어
+    │ DME_GET.req (AttributeID, GenSelectorIndex)
+    ↓
+UniPro DME
+    │ 해당 계층 레지스터 조회
+    ↓
+DME_GET.cnf (값 반환)
+    ↑
+호스트 소프트웨어 수신
+```
+
+#### 17.7.2 v3.0 신규 DME 속성 (주요)
+
+| 계층 | 속성명 | 설명 |
+|------|--------|------|
+| PA | PA_PAM4Enable | PAM4 모드 전환 |
+| PA | PA_FECEnable | RS-FEC 활성화 |
+| PA | PA_PreFECBERMonitor | Pre-FEC BER 실시간 측정 |
+| PA | PA_TxEqualizationPreset | TX FFE 프리셋 선택 |
+| DL | DL_FC0ProtectionTimeOutVal | TC0 흐름 제어 타임아웃 |
+| DL | DL_FC1ProtectionTimeOutVal | TC1 흐름 제어 타임아웃 |
+| DL | DL_FC2ProtectionTimeOutVal | TC2 흐름 제어 타임아웃 (신규) |
+| DL | DL_FC3ProtectionTimeOutVal | TC3 흐름 제어 타임아웃 (신규) |
+| N | N_TrafficClassMapping | CPort별 TC 매핑 |
+| T | T_MaxSDUSize | 최대 SDU 크기 |
+| T | T_CPortSecurityAttr | CPort 보안 격리 속성 |
+
+---
+
+### 17.8 오류 처리 및 복구
+
+#### 17.8.1 오류 감지 계층
+
+| 계층 | 오류 감지 방법 | v3.0 변경사항 |
+|------|-------------|-------------|
+| M-PHY (FEC) | RS(544,514) 정정 | **15심볼까지 정정, 이상은 Uncorrectable 플래그** |
+| DL CRC | CRC-32C | **CRC-16 → CRC-32C 강화** |
+| DL ARQ | Selective Repeat | 윈도우 32 확장 |
+| T 계층 | SDU 시퀀스 번호 | 16비트 확장 |
+
+#### 17.8.2 오류 이벤트 보고 (v3.0)
+
+오류 발생 시 DME를 통해 상위 계층(UTP/UAP)에 통보되는 이벤트가 세분화됐다.
+
+| 이벤트 | 설명 |
+|--------|------|
+| DME_ERROR.ind (PAERR) | PA 계층 오류 (링크 트레이닝 실패, RLM 초과 등) |
+| DME_ERROR.ind (DLERR) | DL 계층 오류 (CRC 불일치, ARQ 한계 초과) |
+| DME_ERROR.ind (NLERR) | N 계층 오류 (잘못된 DeviceID) |
+| DME_ERROR.ind (TLERR) | T 계층 오류 (SDU 재조립 실패) |
+| DME_PAERR_FEC.ind | **FEC Uncorrectable 오류 (v3.0 신규)** |
+| DME_PAERR_RLM.ind | **PAM4 레벨 선형성 위반 (v3.0 신규)** |
+
+---
+
+### 17.9 전력 관리
+
+#### 17.9.1 UniPro 전력 상태
+
+UniPro v3.0은 M-PHY v6.0의 고전력 소비(PAM4 DSP)를 효율적으로 관리하기 위해 전력 전환 절차를 개선했다.
+
+| UniPro 전력 상태 | M-PHY 상태 | 설명 |
+|----------------|----------|------|
+| Active (HS-G6) | HS Burst | PAM4 고속 전송, 등화기 완전 동작 |
+| Active (HS-G1~G5) | HS Burst | NRZ 폴백, 등화기 부분 비활성 |
+| Slow Auto (PWM) | PWM Burst | 저속 유지 모드 |
+| Sleep | SLEEP | 링크 유지, PA 이하 저전력 |
+| HIBERN8 | HIBERN8 | M-PHY 완전 정지, 등화기 계수 저장 |
+
+#### 17.9.2 HIBERN8 진입·복귀 절차 (v3.0)
+
+v3.0에서는 HS-G6 재협상 시간을 단축하기 위해 등화기 계수를 저장·복원하는 **Fast Retrain** 메커니즘이 추가됐다.
+
+```
+HIBERN8 진입:
+1. 상위 계층 → DME_HIBERNATE_ENTER.req
+2. PA 계층이 등화기 계수(FFE, CTLE, DFE 탭) → 비휘발성 레지스터 저장
+3. M-PHY HIBERN8 진입
+4. DME_HIBERNATE_ENTER.cnf 반환
+
+HIBERN8 복귀 (Fast Retrain):
+1. 상위 계층 → DME_HIBERNATE_EXIT.req
+2. M-PHY Wake-up
+3. 저장된 계수로 등화기 즉시 복원 (재트레이닝 생략 or 단축)
+4. Pre-FEC BER 확인 → 합격이면 FEC 활성화 후 즉시 HS-G6 동작
+5. DME_HIBERNATE_EXIT.cnf 반환
+
+일반 Retrain 대비 Fast Retrain 효과:
+- 일반: ~수백 µs (트레이닝 전체 반복)
+- Fast: ~수십 µs (계수 복원 + BER 확인만)
+```
+
+---
+
+### 17.10 UniPro v2.0 vs v3.0 비교
+
+| 분류 | 항목 | UniPro v2.0 | UniPro v3.0 |
+|------|------|-------------|-------------|
+| **PA** | 최고 M-PHY 기어 | HS-G5 | **HS-G6** |
+| **PA** | PAM4 지원 | 없음 | **PA_PAM4Enable** |
+| **PA** | FEC 제어 | 없음 | **PA_FECEnable** |
+| **PA** | 등화기 제어 | 없음 | **프리셋·모드 DME 속성** |
+| **DL** | CRC 방식 | CRC-16 | **CRC-32C** |
+| **DL** | FC 크레딧 최대 | 32,767 | **65,535** |
+| **DL** | ARQ 윈도우 | 8 프레임 | **32 프레임** |
+| **DL** | ARQ 타이머 | 고정 | **동적 (RTT 기반)** |
+| **N** | CPort 수 | 32 | **64** |
+| **N** | 트래픽 클래스 | TC0, TC1 | **TC0~TC3 (4단계)** |
+| **N** | QoS 스케줄러 | 기본 | **WFQ + Strict Priority** |
+| **T** | 최대 SDU 크기 | 32 KB | **256 KB** |
+| **T** | 세그먼트 번호 | 12비트 | **16비트** |
+| **공통** | Fast Retrain | 없음 | **HIBERN8 복귀 단축** |
+| **공통** | FEC 오류 이벤트 | 없음 | **신규 DME 이벤트** |
+| **공통** | PAM4 모니터링 | 없음 | **RLM, Pre-FEC BER** |
+
+---
+
+### 17.11 UFS 5.0 스택 전체 연계 구조
+
+UFS 5.0, M-PHY v6.0, UniPro v3.0은 다음과 같이 상호 의존 관계를 가진다.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  UFS 5.0 (JESD220F)                         │
+│  UAP: 명령 처리, LUN 관리, 디스크립터                         │
+│  UTP: UPIU 생성·파싱, 큐 깊이 256, Task Management          │
+├─────────────────────────────────────────────────────────────┤
+│               MIPI UniPro v3.0                               │
+│  T: CPort 64개, SDU 256KB, TC0~TC3 QoS                      │
+│  N: DeviceID 3비트, CPortID 6비트                            │
+│  DL: CRC-32C, FC 크레딧 64K, ARQ 윈도우 32, Fast Retrain    │
+│  PA: HS-G6 협상, PAM4 Enable, FEC Enable, 등화기 프리셋     │
+├─────────────────────────────────────────────────────────────┤
+│               MIPI M-PHY v6.0                                │
+│  HS-G6: PAM4 46.4 Gbps/lane, RS-FEC RS(544,514)             │
+│  등화기: TX FFE 5탭 + RX CTLE + DFE 5탭 (적응형)            │
+│  트레이닝: Phase 1~5 적응 시퀀스, 수렴 후 FEC 활성화         │
+└─────────────────────────────────────────────────────────────┘
+         ↑ 모두 하위 호환 (HS-G1~G5 NRZ로 폴백 가능) ↑
+```
+
+---
+
 ## 참고 문헌
 
 1. JEDEC Standard JESD220F — *Universal Flash Storage (UFS) Version 5.0*, JEDEC Solid State Technology Association
 2. JEDEC Standard JESD220-4 — *UFS Host Controller Interface (UFSHCI)*
-3. MIPI Alliance Specification for M-PHY, Version 5.0
-4. MIPI Alliance Specification for UniPro, Version 2.0
+3. MIPI Alliance Specification for M-PHY, **Version 6.0**
+4. MIPI Alliance Specification for UniPro, **Version 3.0**
 5. JEDEC Standard JESD223 — *UFS Flash Memory Interface*
 6. JEDEC White Paper: *Introduction to Universal Flash Storage (UFS)*
+7. IEEE 802.3 — *KP4 FEC (RS(544,514)) 참조 구현*
+8. MIPI Alliance White Paper: *M-PHY HS-G6 PAM4 Signal Integrity Guide*
 
 ---
 
-*본 문서는 UFS 5.0 공개 기술 자료를 바탕으로 작성된 한국어 번역 요약본입니다. 법적 효력이 있는 원문 규격은 JEDEC 공식 웹사이트(www.jedec.org)에서 구입하시기 바랍니다.*
+*본 문서는 UFS 5.0 공개 기술 자료를 바탕으로 작성된 한국어 번역 요약본입니다. 법적 효력이 있는 원문 규격은 JEDEC 공식 웹사이트(www.jedec.org) 및 MIPI Alliance 공식 웹사이트(www.mipi.org)에서 구입하시기 바랍니다.*
