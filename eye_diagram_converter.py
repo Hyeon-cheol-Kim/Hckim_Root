@@ -102,41 +102,47 @@ def calc_y_coords(y_indices: list, params: dict) -> np.ndarray:
 # 3. 마스크 중심점 및 마진 계산
 # ─────────────────────────────────────────────────────────────────
 
+def _max_contiguous_zeros(row_data: np.ndarray):
+    """한 행에서 연속된 0의 최대 길이와 그 구간의 시작/끝 인덱스 반환."""
+    is_zero = (row_data == 0).astype(int)
+    padded  = np.concatenate([[0], is_zero, [0]])
+    diff    = np.diff(padded)
+    starts  = np.where(diff == 1)[0]
+    ends    = np.where(diff == -1)[0]
+    if len(starts) == 0:
+        return 0, -1, -1
+    lengths  = ends - starts
+    best_idx = int(np.argmax(lengths))
+    return int(lengths[best_idx]), int(starts[best_idx]), int(ends[best_idx] - 1)
+
+
 def find_mask_center(data: np.ndarray,
                      x_coords: np.ndarray,
                      y_coords: np.ndarray,
                      y_min_mv: float,
                      y_max_mv: float):
     """
-    지정 voltage 범위에서 value==0 셀이 가장 많은 행(들)을 찾아
+    지정 voltage 범위에서 연속된 0의 최대 길이가 가장 긴 행을 찾아
     중심점 (cx, cy) 반환.
-    - 동점 행이 여러 개이면 그 행들의 중간(median) voltage를 cy로 사용
-    - cx = 해당 행(들)에서 0인 셀의 (min_x + max_x) / 2
+    - cx = 해당 행의 최장 연속 0 구간 중앙 x
     없으면 (None, None) 반환.
     """
     row_mask = (y_coords >= y_min_mv) & (y_coords <= y_max_mv)
     if not np.any(row_mask):
         return None, None
 
-    sub_idx   = np.where(row_mask)[0]
-    zero_cnts = np.array([np.sum(data[r, :] == 0) for r in sub_idx])
-    max_count = zero_cnts.max()
-    if max_count == 0:
+    sub_idx  = np.where(row_mask)[0]
+    runs     = [_max_contiguous_zeros(data[r, :])[0] for r in sub_idx]
+    max_run  = max(runs)
+    if max_run == 0:
         return None, None
 
-    best_rows = sub_idx[zero_cnts == max_count]
+    best_rows = sub_idx[np.array(runs) == max_run]
+    mid_row   = best_rows[len(best_rows) // 2]
+    cy        = float(y_coords[mid_row])
 
-    # 동점 행들의 중간(median) 인덱스 → voltage
-    mid_row = best_rows[len(best_rows) // 2]
-    cy = float(y_coords[mid_row])
-
-    # 해당 행들 전체에서 0인 셀의 x 범위
-    all_zero_x = []
-    for r in best_rows:
-        zmask = (data[r, :] == 0)
-        all_zero_x.extend(x_coords[zmask].tolist())
-
-    cx = (min(all_zero_x) + max(all_zero_x)) / 2.0
+    _, s, e = _max_contiguous_zeros(data[mid_row, :])
+    cx = float((x_coords[s] + x_coords[e]) / 2.0)
     return cx, cy
 
 
@@ -151,7 +157,7 @@ def _contiguous_cluster(values: np.ndarray, target: float, step: float):
     if len(sorted_v) == 1:
         return sorted_v if abs(sorted_v[0] - target) <= step else None
     gaps = np.diff(sorted_v)
-    split_pts = np.where(gaps > 2 * step)[0] + 1
+    split_pts = np.where(gaps > step * 1.5)[0] + 1
     clusters = np.split(sorted_v, split_pts)
     for c in clusters:
         if c.min() <= target <= c.max():
@@ -179,30 +185,22 @@ def calc_mask_margin(data: np.ndarray,
     step_x = float(abs(x_arr[1] - x_arr[0])) if len(x_arr) > 1 else 1.0
     step_y = float(abs(y_arr[1] - y_arr[0])) if len(y_arr) > 1 else 1.0
 
-    # Width 기준 행: 해당 Eye 영역에서 0이 가장 많은 행
+    # Width 기준 행: 해당 Eye 영역에서 연속 0의 최대 길이가 가장 긴 행
     row_mask = (y_arr >= y_min_mv) & (y_arr <= y_max_mv)
     sub_idx  = np.where(row_mask)[0]
     if len(sub_idx) == 0:
         return 0.0, 0.0
-    zero_cnts = np.array([np.sum(data[r, :] == 0) for r in sub_idx])
-    max_cnt   = zero_cnts.max()
-    if max_cnt == 0:
+    runs    = [_max_contiguous_zeros(data[r, :])[0] for r in sub_idx]
+    max_run = max(runs)
+    if max_run == 0:
         return 0.0, 0.0
-    best_rows = sub_idx[zero_cnts == max_cnt]
+    best_rows = sub_idx[np.array(runs) == max_run]
     ref_row   = best_rows[len(best_rows) // 2]
 
-    # Width: 기준 행에서 cx 포함 연속 클러스터
-    zero_x    = x_arr[data[ref_row, :] == 0]
-    cluster_x = _contiguous_cluster(zero_x, cx, step_x)
-    if cluster_x is not None and len(cluster_x) >= 2:
-        width_ui = float(cluster_x.max() - cluster_x.min())
-        cx_ref   = float((cluster_x.max() + cluster_x.min()) / 2)
-    elif cluster_x is not None:
-        width_ui = step_x
-        cx_ref   = float(cluster_x[0])
-    else:
-        width_ui = 0.0
-        cx_ref   = cx
+    # Width: 기준 행의 최장 연속 0 구간
+    _, s, e = _max_contiguous_zeros(data[ref_row, :])
+    width_ui = float(x_arr[e] - x_arr[s])
+    cx_ref   = float((x_arr[s] + x_arr[e]) / 2)
 
     # Height: cx_ref 열에서 cy 포함 연속 클러스터 (해당 Eye 영역 내)
     col_idx     = int(np.argmin(np.abs(x_arr - cx_ref)))
