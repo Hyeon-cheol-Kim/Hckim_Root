@@ -208,12 +208,10 @@ def calc_mask_margin(data: np.ndarray,
 # ─────────────────────────────────────────────────────────────────
 
 def build_colormap():
-    """Error count 0 (파란색) → 63 (빨간색) 컬러맵."""
+    """Error count 0 (파란색) → 중간 (흰색) → max (빨간색) 컬러맵."""
     return mcolors.LinearSegmentedColormap.from_list('eye', [
         (0.00, '#0000FF'),
-        (0.25, '#00BFFF'),
-        (0.50, '#00FF80'),
-        (0.75, '#FFFF00'),
+        (0.50, '#FFFFFF'),
         (1.00, '#FF0000'),
     ])
 
