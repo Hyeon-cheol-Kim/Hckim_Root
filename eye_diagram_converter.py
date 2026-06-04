@@ -167,9 +167,11 @@ def calc_mask_margin(data: np.ndarray,
                      cx: float, cy: float,
                      y_min_mv: float, y_max_mv: float):
     """
-    마스크 중심점(cx, cy) 기준으로 해당 Eye 영역 안에서만 계산.
-    - Width  : cy 행에서 cx를 포함하는 연속 0값 클러스터의 x 범위 → UI
-    - Height : cx 열에서 cy를 포함하는 연속 0값 클러스터의 y 범위 → mV
+    Width 기준 행(0이 가장 많은 행)의 중앙 위치를 cx로 재계산하고,
+    그 cx 열에서 세로 연속 0값으로 height를 계산.
+    - Width  : 0이 가장 많은 행에서 cx 포함 연속 0값 클러스터의 x 범위 → UI
+    - cx_ref : 해당 클러스터의 (min+max)/2
+    - Height : cx_ref 열에서 cy 포함 연속 0값 클러스터의 y 범위 → mV
     반환: (width_ui, height_mv)
     """
     x_arr  = np.array(x_coords)
@@ -177,22 +179,36 @@ def calc_mask_margin(data: np.ndarray,
     step_x = float(abs(x_arr[1] - x_arr[0])) if len(x_arr) > 1 else 1.0
     step_y = float(abs(y_arr[1] - y_arr[0])) if len(y_arr) > 1 else 1.0
 
-    # Width: cy에 가장 가까운 행에서 cx 포함 연속 클러스터
-    row_idx = int(np.argmin(np.abs(y_arr - cy)))
-    zero_x  = x_arr[data[row_idx, :] == 0]
+    # Width 기준 행: 해당 Eye 영역에서 0이 가장 많은 행
+    row_mask = (y_arr >= y_min_mv) & (y_arr <= y_max_mv)
+    sub_idx  = np.where(row_mask)[0]
+    if len(sub_idx) == 0:
+        return 0.0, 0.0
+    zero_cnts = np.array([np.sum(data[r, :] == 0) for r in sub_idx])
+    max_cnt   = zero_cnts.max()
+    if max_cnt == 0:
+        return 0.0, 0.0
+    best_rows = sub_idx[zero_cnts == max_cnt]
+    ref_row   = best_rows[len(best_rows) // 2]
+
+    # Width: 기준 행에서 cx 포함 연속 클러스터
+    zero_x    = x_arr[data[ref_row, :] == 0]
     cluster_x = _contiguous_cluster(zero_x, cx, step_x)
     if cluster_x is not None and len(cluster_x) >= 2:
         width_ui = float(cluster_x.max() - cluster_x.min())
+        cx_ref   = float((cluster_x.max() + cluster_x.min()) / 2)
     elif cluster_x is not None:
         width_ui = step_x
+        cx_ref   = float(cluster_x[0])
     else:
         width_ui = 0.0
+        cx_ref   = cx
 
-    # Height: cx에 가장 가까운 열에서 cy 포함 연속 클러스터 (해당 Eye 영역 내)
-    col_idx     = int(np.argmin(np.abs(x_arr - cx)))
+    # Height: cx_ref 열에서 cy 포함 연속 클러스터 (해당 Eye 영역 내)
+    col_idx     = int(np.argmin(np.abs(x_arr - cx_ref)))
     region_mask = (y_arr >= y_min_mv) & (y_arr <= y_max_mv)
     col_zeros_y = y_arr[(data[:, col_idx] == 0) & region_mask]
-    cluster_y = _contiguous_cluster(col_zeros_y, cy, step_y)
+    cluster_y   = _contiguous_cluster(col_zeros_y, cy, step_y)
     if cluster_y is not None and len(cluster_y) >= 2:
         height_mv = float(cluster_y.max() - cluster_y.min())
     elif cluster_y is not None:
