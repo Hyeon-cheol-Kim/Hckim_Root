@@ -1179,6 +1179,191 @@ RS-FEC 적용 후 BER: ~10⁻⁶
 ```
 
 
+## 18. Integrated Link Equalization 상세 해설
+
+> **출처**: JEDEC JESD220H (UFS 5.0), MIPI M-PHY v6.0 공식 규격, MIPI UniPro v3.0 공식 규격, MIPI Alliance 공식 보도자료 (2026년 2월)
+
+---
+
+### 18.1 개념 정의 (공식 표현)
+
+각 규격이 공식적으로 서술하는 표현:
+
+| 규격             | 공식 표현                                                                                  |
+| -------------- | -------------------------------------------------------------------------------------- |
+| JEDEC UFS 5.0  | "enhanced signal integrity through **integrated link equalization**"                   |
+| MIPI M-PHY v6.0 | "**optional** link equalization and training feature to enable greater performance margin and enhanced interoperability" |
+| MIPI UniPro v3.0 | "introduction of a **link equalization training procedure** to help the application layer identify optimal Tx equalization settings" |
+
+**Integrated Link Equalization**은 UFS 5.0이 HS-G6(PAM4, 46.694 Gbps/lane)에서 신호 무결성(Signal Integrity)을 확보하기 위해 M-PHY v6.0의 선택적 등화기 하드웨어와 UniPro v3.0의 등화기 트레이닝 절차를 통합 적용하는 구조를 가리킨다.
+
+---
+
+### 18.2 등화(Equalization)가 필요한 이유
+
+#### 18.2.1 PAM4 Eye 열화
+
+PAM4는 동일한 보레이트(Baud Rate)에서 NRZ 대비 2배의 데이터를 전송하지만, 4-레벨 신호로 인해 Eye 높이가 NRZ의 **1/3**로 줄어든다.
+
+```
+NRZ Eye (HS-G5):            PAM4 Eye ×3 (HS-G6):
+
+  ████████                   ━━━━  레벨 3
+━━━━━━━━━━━━━                 ↕ Eye 2 (1/3)
+  ████████                   ━━━━  레벨 2
+                              ↕ Eye 1 (1/3)
+                             ━━━━  레벨 1
+━━━━━━━━━━━━━                 ↕ Eye 0 (1/3)
+                             ━━━━  레벨 0
+
+Eye 높이 = 전체 신폭            Eye 높이 = 전체 신폭/3
+```
+
+- Eye 높이가 1/3으로 감소 → 노이즈·지터 허용 마진이 크게 줄어듦
+- SNR(신호 대 잡음비) 요구가 NRZ 대비 큰 폭으로 증가
+
+#### 18.2.2 고주파 채널 손실 (Channel Loss)
+
+HS-G6의 보레이트는 HS-G5 대비 2배이므로, 채널(PCB 배선, 커넥터, 패키지)에서 발생하는 고주파 손실이 크게 증가한다.
+
+- 채널 손실 특성: 주파수가 높을수록 손실이 증가 (skin effect, dielectric loss)
+- 손실이 크면 수신 신호 파형이 뭉개져 Eye가 추가로 닫힘
+
+#### 18.2.3 ISI (Inter-Symbol Interference, 심볼 간 간섭)
+
+고속 신호에서 이전 심볼이 현재 심볼에 영향을 주는 ISI가 심화된다.
+
+- ISI는 Eye를 수직(높이)·수평(너비) 양방향으로 닫는다
+- PAM4 환경에서는 NRZ보다 ISI에 대한 민감도가 높다
+
+---
+
+### 18.3 등화기 구성 요소
+
+공식 규격은 구체적인 등화기 탭 수나 파라미터 수치를 공개하지 않는다. 아래는 고속 직렬 인터페이스에서 일반적으로 사용하는 등화기 유형과 그 역할이다.
+
+#### 18.3.1 TX FFE (Feed-Forward Equalization, 송신 전치 등화)
+
+- 송신단에서 신호를 전송하기 **전에** 채널의 주파수 응답을 역보상(pre-emphasis)
+- 고주파 성분을 미리 강조하여 채널 통과 후 파형을 평탄하게 함
+- **UniPro v3.0 트레이닝 절차의 주요 제어 대상**: "응용 계층이 최적 TX 등화 설정을 파악"
+
+#### 18.3.2 RX CTLE (Continuous Time Linear Equalizer, 수신 아날로그 등화)
+
+- 수신단 아날로그 회로에서 채널 손실을 주파수 영역에서 보상
+- 고주파 이득을 높여 손실된 신호 성분 복원
+
+#### 18.3.3 RX DFE (Decision Feedback Equalizer, 결정 궤환 등화)
+
+- 수신단에서 이전에 결정(슬라이싱)된 심볼을 피드백으로 활용하여 ISI를 디지털적으로 제거
+- **UniPro v3.0 프리코딩(Precoding)**: DFE 성능을 향상시키기 위해 1b1b 인코딩 체계에 포함됨
+
+---
+
+### 18.4 Integrated Link Equalization의 두 축
+
+UFS 5.0의 "통합(Integrated)" 구조는 다음 두 계층이 역할을 분담하는 방식이다.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  MIPI UniPro v3.0 (링크 계층)                             │
+│  • 링크 등화기 트레이닝 절차(프로토콜)                     │
+│  • 응용 계층이 최적 TX FFE 설정을 파악하도록 지원          │
+│  • 프리코딩(Precoding) — DFE 성능 향상 지원               │
+├──────────────────────────────────────────────────────────┤
+│  MIPI M-PHY v6.0 (물리 계층)                              │
+│  • 선택적(Optional) 등화기 하드웨어 (TX FFE / RX CTLE 등) │
+│  • 성능 마진 확대 및 상호운용성 향상 목적                  │
+└──────────────────────────────────────────────────────────┘
+```
+
+| 역할                    | 담당 규격         | 내용                                           |
+| --------------------- | ------------- | -------------------------------------------- |
+| 등화기 하드웨어(선택적)         | M-PHY v6.0   | TX FFE, RX CTLE 등 물리 등화기 회로                 |
+| 등화기 트레이닝 프로토콜         | UniPro v3.0  | 응용 계층이 최적 TX 등화 설정을 결정하는 절차                 |
+| 등화기 성능 향상 지원 (인코딩)    | UniPro v3.0  | 프리코딩(Precoding)으로 DFE 오류 전파 방지               |
+| 통합 적용 선언              | UFS 5.0      | "integrated link equalization" 으로 신호 무결성 확보  |
+
+---
+
+### 18.5 트레이닝 절차 개요 (UniPro v3.0 공식 내용 기반)
+
+MIPI UniPro v3.0은 **링크 등화기 트레이닝 절차**를 공식적으로 정의한다. 공식 발표에 명시된 내용:
+
+> "introduction of a link equalization training procedure to help the application layer identify optimal Tx equalization settings"
+
+즉, 트레이닝의 목적은 **최적 TX 등화 설정 파악**이다. 구체적 절차 단계(Step-by-Step)는 공식 유료 규격에 수록되어 있어 아래에는 원칙만 기재한다.
+
+**트레이닝의 일반 원리:**
+
+1. 송신단이 특정 TX FFE 설정으로 트레이닝 패턴 전송
+2. 수신단이 Eye 마진(BER, 신호 품질) 측정
+3. 측정 결과를 링크 프로토콜을 통해 응용 계층에 전달
+4. 응용 계층이 최적 설정을 결정하여 TX FFE 적용
+5. 반복 수렴 후 트레이닝 완료, 데이터 전송 시작
+
+---
+
+### 18.6 Integrated Link Equalization과 RS-FEC의 관계
+
+Integrated Link Equalization과 RS-FEC는 서로 **보완적** 역할을 한다.
+
+```
+물리 채널
+   │
+   ▼
+[등화기 (M-PHY v6.0 선택적)]
+   │  채널 손실·ISI 보상 → Eye 개선
+   ▼
+[RS-FEC (UniPro v3.0)]
+   │  잔여 비트 오류 정정 → BER ~10⁻⁶ 달성
+   ▼
+[64비트 CRC (UniPro v3.0)]
+   │  데이터 무결성 검증
+   ▼
+응용 계층 BER < 10⁻²²
+```
+
+| 기능                  | 역할                                | 적용 위치        |
+| ------------------- | --------------------------------- | ------------ |
+| TX FFE / RX CTLE    | 채널 손실·ISI 보상 (하드웨어)              | M-PHY v6.0  |
+| 프리코딩                | DFE 오류 전파 방지 (인코딩)               | UniPro v3.0 |
+| RS-FEC              | 잔여 비트 오류 정정                       | UniPro v3.0 |
+| 64비트 CRC            | 최종 데이터 무결성 검증                    | UniPro v3.0 |
+| **결합 효과**           | **응용 계층 BER < 10⁻²²**            | UFS 5.0     |
+
+---
+
+### 18.7 "선택적(Optional)" 적용의 의미
+
+M-PHY v6.0은 링크 등화기를 **선택적(Optional)**으로 정의한다. 이는:
+
+- 등화기 하드웨어 구현 여부는 칩 설계사(fabless/IDM)의 선택
+- 등화기를 구현하지 않아도 HS-G6 동작은 가능하나, 채널 손실이 큰 환경에서는 성능 마진 감소
+- UniPro v3.0의 트레이닝 절차는 등화기가 구현된 장치에서만 의미 있음
+- 등화기 미구현 장치 간 연결 시에도 RS-FEC·64비트 CRC는 여전히 동작
+
+**MIPI 공식 표현**: "optional link equalization and training feature to enable **greater performance margin** and **enhanced interoperability**"
+
+→ 등화기는 필수(Mandatory)가 아닌 성능 마진·상호운용성 향상을 위한 선택적 강화 기능이다.
+
+---
+
+### 18.8 요약
+
+| 항목         | 내용                                                        |
+| ---------- | --------------------------------------------------------- |
+| 정식 명칭      | Integrated Link Equalization (통합 링크 등화)                   |
+| UFS 5.0 선언 | "enhanced signal integrity through integrated link equalization" |
+| 물리 계층 역할   | M-PHY v6.0 — 선택적 등화기 하드웨어 (TX FFE, RX CTLE 등)           |
+| 링크 계층 역할   | UniPro v3.0 — 링크 등화기 트레이닝 절차 (최적 TX 설정 파악)              |
+| 필요 이유      | PAM4 Eye 1/3 감소 + HS-G6 고주파 채널 손실 + ISI 증가              |
+| 연계 기능      | 프리코딩(Precoding), RS-FEC, 64비트 CRC                        |
+| 최종 BER 목표  | < 10⁻²² (응용 계층, RS-FEC + 64비트 CRC 조합)                   |
+| 등화기 의무 여부  | **선택적(Optional)** — M-PHY v6.0 공식 표현                     |
+
+---
+
 ## 참고 문헌
 
 ### 공식 규격 문서
