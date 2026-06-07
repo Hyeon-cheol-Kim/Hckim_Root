@@ -755,8 +755,8 @@ def convert(txt_path: str, csv_paths: list, out_dir: str = None, dpi: int = 150)
         )
         plt.tight_layout()
 
-        # PNG 저장: {BaseName}_{LaneName}.png
-        out_path = os.path.join(out_dir, f'{base_name}_{lane_name}.png')
+        # PNG 저장: PAM4_{BaseName}_{LaneName}.png
+        out_path = os.path.join(out_dir, f'PAM4_{base_name}_{lane_name}.png')
         plt.savefig(out_path, dpi=dpi, bbox_inches='tight',
                     facecolor=fig.get_facecolor())
         plt.close(fig)   # 메모리 해제
