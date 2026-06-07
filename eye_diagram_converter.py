@@ -33,6 +33,15 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.collections import LineCollection
 from matplotlib.patches import Polygon
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    _XLSX_AVAILABLE = True
+except ImportError:
+    _XLSX_AVAILABLE = False
+
+# 스크립트 실행 시점의 타임스탬프 (시트명으로 사용)
+_RUN_TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -415,33 +424,67 @@ def plot_eye_diagram(ax, data: np.ndarray,
 
 def append_to_db(base_name: str, all_lane_margins: list):
     """
-    EOM_DB.csv 에 한 줄 추가.
+    EOM_DB.xlsx 에 기록.
+    - 실행 시마다 새 시트(_RUN_TIMESTAMP) 생성
+    - 한 실행 안에서 여러 세트를 변환하면 같은 시트에 행 추가
+    - openpyxl 미설치 시 EOM_DB.csv 로 폴백
     all_lane_margins : [(lane_name, mask_info_list), ...]
       mask_info_list : [('Upper', w, h), ('Middle', w, h), ('Lower', w, h)]
-    한 줄 형식:
-      datetime, input_file, l0_up_w, l0_up_h, l0_mid_w, l0_mid_h, l0_low_w, l0_low_h,
-                            l1_up_w, l1_up_h, l1_mid_w, l1_mid_h, l1_low_w, l1_low_h
     """
-    db_path   = os.path.join(os.getcwd(), 'EOM_DB.csv')
-    write_hdr = not os.path.exists(db_path)
-
     header_lane = ['up_w(UI)', 'up_h(mV)', 'mid_w(UI)', 'mid_h(mV)', 'low_w(UI)', 'low_h(mV)']
     header = ['datetime', 'input_file']
     for lane_name, _ in all_lane_margins:
         header += [f'{lane_name}_{col}' for col in header_lane]
 
-    row = [datetime.now().strftime('%Y%m%d%H%M%S'), base_name]
+    data_row = [datetime.now().strftime('%Y%m%d%H%M%S'), base_name]
     for _, mask_info_list in all_lane_margins:
         for _, w_ui, h_mv in mask_info_list:
-            row += [f'{w_ui:.4f}', f'{h_mv:.2f}']
+            data_row += [round(w_ui, 4), round(h_mv, 2)]
 
-    with open(db_path, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        if write_hdr:
-            writer.writerow(header)
-        writer.writerow(row)
+    # ── xlsx 저장 ────────────────────────────────────────────────
+    if _XLSX_AVAILABLE:
+        db_path = os.path.join(os.getcwd(), 'EOM_DB.xlsx')
 
-    print(f"  → DB 저장: {db_path}")
+        if os.path.exists(db_path):
+            wb = openpyxl.load_workbook(db_path)
+        else:
+            wb = openpyxl.Workbook()
+            if 'Sheet' in wb.sheetnames:
+                del wb['Sheet']
+
+        # 이번 실행의 시트가 없으면 생성 + 헤더 기록
+        if _RUN_TIMESTAMP not in wb.sheetnames:
+            ws = wb.create_sheet(title=_RUN_TIMESTAMP)
+            ws.append(header)
+            # 헤더 스타일: 굵게 + 배경색
+            hdr_fill = PatternFill('solid', fgColor='1F4E79')
+            for cell in ws[1]:
+                cell.font      = Font(bold=True, color='FFFFFF')
+                cell.fill      = hdr_fill
+                cell.alignment = Alignment(horizontal='center')
+            # 열 너비 자동 설정
+            for i, col_title in enumerate(header, 1):
+                ws.column_dimensions[
+                    openpyxl.utils.get_column_letter(i)
+                ].width = max(len(col_title) + 2, 12)
+        else:
+            ws = wb[_RUN_TIMESTAMP]
+
+        ws.append(data_row)
+        wb.save(db_path)
+        print(f"  → DB 저장: {db_path}  [시트: {_RUN_TIMESTAMP}]")
+
+    # ── 폴백: csv 저장 ───────────────────────────────────────────
+    else:
+        print("  [경고] openpyxl 미설치 → EOM_DB.csv 로 저장합니다.")
+        db_path   = os.path.join(os.getcwd(), 'EOM_DB.csv')
+        write_hdr = not os.path.exists(db_path)
+        with open(db_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if write_hdr:
+                writer.writerow(header)
+            writer.writerow(data_row)
+        print(f"  → DB 저장: {db_path}")
 
 
 def convert(txt_path: str, csv_paths: list, out_dir: str = None, dpi: int = 150):
