@@ -619,15 +619,15 @@ def plot_eye_diagram(ax, data: np.ndarray,
 # 6. 변환 실행
 # ─────────────────────────────────────────────────────────────────
 
-def append_to_db(base_name: str, all_lane_margins: list):
+def append_to_db(base_name: str, all_lane_margins: list, out_dir: str = ''):
     """
     변환 결과(마진 값)를 EOM_DB.xlsx 에 기록.
 
     저장 구조:
         - 파일: EOM_DB.xlsx (스크립트 실행 경로의 현재 디렉토리)
-        - 시트: 스크립트 시작 시각(_RUN_TIMESTAMP)으로 자동 생성
-          → 한 번 실행에서 여러 세트를 변환해도 같은 시트에 행이 추가됨
-          → 다음 실행 시 새 시트가 생성되어 탭으로 구분됨
+        - 시트: 변환 폴더명에서 앞의 "EOM_" 또는 "EOM" 을 제거한 이름으로 생성
+          → 같은 폴더에서 여러 세트를 변환해도 같은 시트에 행이 추가됨
+          → 다른 폴더 변환 시 새 시트가 생성되어 탭으로 구분됨
         - 헤더: datetime, input_file, {lane}_{eye}_{w/h} ...
         - 데이터: 1행 = 1개 변환 세트 (lane0 + lane1 + ... 순서)
 
@@ -639,7 +639,12 @@ def append_to_db(base_name: str, all_lane_margins: list):
             mask_info_list : [('Upper', w_ui, h_mv),
                               ('Middle', w_ui, h_mv),
                               ('Lower', w_ui, h_mv)]
+        out_dir          : 변환 폴더 경로 (탭 이름 생성에 사용)
     """
+    # 폴더명에서 "EOM_" 또는 "EOM" 접두어 제거 → 탭 이름
+    folder_name = os.path.basename(os.path.abspath(out_dir)) if out_dir else ''
+    sheet_name  = re.sub(r'^EOM_?', '', folder_name) or _RUN_TIMESTAMP
+    sheet_name  = sheet_name[:31]   # Excel 시트명 최대 31자 제한
     # ── 헤더 및 데이터 행 구성 ───────────────────────────────────
     # 각 Lane 의 컬럼: up_w, up_h, mid_w, mid_h, low_w, low_h
     header_lane = ['up_w(UI)', 'up_h(mV)', 'mid_w(UI)',
@@ -667,9 +672,9 @@ def append_to_db(base_name: str, all_lane_margins: list):
             if 'Sheet' in wb.sheetnames:
                 del wb['Sheet']
 
-        # 이번 실행의 시트가 없으면 새로 생성 + 헤더 기록
-        if _RUN_TIMESTAMP not in wb.sheetnames:
-            ws = wb.create_sheet(title=_RUN_TIMESTAMP)
+        # 해당 폴더명 시트가 없으면 새로 생성 + 헤더 기록
+        if sheet_name not in wb.sheetnames:
+            ws = wb.create_sheet(title=sheet_name)
             ws.append(header)
 
             # 헤더 행 스타일: 굵은 흰색 글씨 + 남색 배경
@@ -686,11 +691,11 @@ def append_to_db(base_name: str, all_lane_margins: list):
                 ].width = max(len(col_title) + 2, 12)
         else:
             # 이미 시트가 있으면 기존 시트에 행만 추가
-            ws = wb[_RUN_TIMESTAMP]
+            ws = wb[sheet_name]
 
         ws.append(data_row)
         wb.save(db_path)
-        print(f"  → DB 저장: {db_path}  [시트: {_RUN_TIMESTAMP}]")
+        print(f"  → DB 저장: {db_path}  [시트: {sheet_name}]")
 
     # ── 폴백: csv 저장 (openpyxl 미설치 시) ─────────────────────
     else:
@@ -766,7 +771,7 @@ def convert(txt_path: str, csv_paths: list, out_dir: str = None, dpi: int = 150)
         all_lane_margins.append((lane_name, mask_info_list))
 
     # 전체 lane 마진을 DB 에 한 줄로 기록
-    append_to_db(base_name, all_lane_margins)
+    append_to_db(base_name, all_lane_margins, out_dir)
     print("\n완료!")
 
 
