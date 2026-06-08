@@ -30,6 +30,7 @@ import os                           # 파일/폴더 경로 처리
 import sys                          # 명령줄 인수(argv) 처리
 import numpy as np                  # 행렬 연산
 from datetime import datetime       # 타임스탬프 생성
+from io import BytesIO              # 메모리 내 파일 버퍼 (차트 이미지 임베드용)
 
 # ── 시각화 라이브러리 ──────────────────────────────────────────────
 import matplotlib.pyplot as plt
@@ -42,6 +43,7 @@ from matplotlib.patches import Polygon              # 마름모 마스크
 try:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.drawing.image import Image as XLImage
     _XLSX_AVAILABLE = True
 except ImportError:
     _XLSX_AVAILABLE = False
@@ -616,7 +618,115 @@ def plot_eye_diagram(ax, data: np.ndarray,
 
 
 # ─────────────────────────────────────────────────────────────────
-# 6. 변환 실행
+# 6. EOM DB 탭 내 분포 차트 삽입
+# ─────────────────────────────────────────────────────────────────
+
+def _embed_sheet_chart(ws):
+    """
+    openpyxl 워크시트(ws)의 모든 데이터 행을 읽어
+    Lane0·Lane1 × Upper·Middle·Lower = 6개 서브플롯 scatter 차트를
+    해당 시트의 데이터 마지막 행 바로 아래에 PNG 이미지로 삽입.
+
+    삽입 규칙:
+        - 기존에 이미지가 있으면 교체(ws._images 초기화)
+        - X축(Width), Y축(Height) 모두 0부터 시작
+        - Fail 기준: Width ≤ 0.24 UI  또는  Height ≤ 50 mV
+          → L자형 영역을 투명도 30% 빨간색으로 채움
+        - Fail 경계선: 빨간 점선
+
+    컬럼 레이아웃 (0-based):
+        0=datetime, 1=input_file,
+        2=lane0_up_w, 3=lane0_up_h, 4=lane0_mid_w, 5=lane0_mid_h,
+        6=lane0_low_w, 7=lane0_low_h,
+        8=lane1_up_w, 9=lane1_up_h, 10=lane1_mid_w, 11=lane1_mid_h,
+        12=lane1_low_w, 13=lane1_low_h
+    """
+    FAIL_W     = 0.24    # Width  스펙 하한 (UI)
+    FAIL_H     = 50.0    # Height 스펙 하한 (mV)
+    COL_OFFSET = 2       # datetime, input_file 열 제외
+    lane_labels = ['Lane0', 'Lane1']
+    eye_labels  = ['Upper', 'Middle', 'Lower']
+
+    # ── 시트에서 데이터 읽기 ────────────────────────────────────────
+    rows = list(ws.iter_rows(values_only=True))
+    if len(rows) < 2:
+        return   # 헤더만 있으면 차트 생략
+
+    pts = {(li, ei): ([], []) for li in range(2) for ei in range(3)}
+    for row in rows[1:]:   # 0번째 = 헤더
+        for li in range(2):
+            for ei in range(3):
+                w_col = COL_OFFSET + li * 6 + ei * 2
+                h_col = w_col + 1
+                if w_col < len(row) and h_col < len(row):
+                    w, h = row[w_col], row[h_col]
+                    if w is not None and h is not None:
+                        try:
+                            pts[(li, ei)][0].append(float(w))
+                            pts[(li, ei)][1].append(float(h))
+                        except (TypeError, ValueError):
+                            pass
+
+    # ── 2행 × 3열 서브플롯 생성 ────────────────────────────────────
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    fig.suptitle('EOM Margin Distribution  (X: Width [UI]  /  Y: Height [mV])',
+                 fontsize=13, fontweight='bold')
+
+    for li, lane_lbl in enumerate(lane_labels):
+        for ei, eye_lbl in enumerate(eye_labels):
+            ax       = axes[li][ei]
+            ws_arr, hs_arr = pts[(li, ei)]
+
+            # 축 범위: 0부터 시작, 데이터 최댓값 + 15% 여백 (최소 Fail 기준 2.5배)
+            x_max = max(max(ws_arr) * 1.15, FAIL_W * 2.5) if ws_arr else FAIL_W * 3
+            y_max = max(max(hs_arr) * 1.15, FAIL_H * 2.5) if hs_arr else FAIL_H * 3
+            ax.set_xlim(0, x_max)
+            ax.set_ylim(0, y_max)
+
+            # Fail zone: L자형 polygon (x ≤ FAIL_W  OR  y ≤ FAIL_H)
+            # 꼭짓점: 왼쪽 하단에서 시계 반대 방향으로 L자를 둘러쌈
+            fail_poly = Polygon(
+                [(0, 0), (0, y_max), (FAIL_W, y_max),
+                 (FAIL_W, FAIL_H), (x_max, FAIL_H), (x_max, 0)],
+                closed=True, facecolor='red', alpha=0.3,
+                edgecolor='none', zorder=0
+            )
+            ax.add_patch(fail_poly)
+
+            # Fail 경계선
+            ax.axvline(x=FAIL_W, color='red', linewidth=1.2,
+                       linestyle='--', zorder=2, label=f'W={FAIL_W} UI')
+            ax.axhline(y=FAIL_H, color='red', linewidth=1.2,
+                       linestyle='--', zorder=2, label=f'H={FAIL_H} mV')
+            ax.legend(fontsize=7, loc='upper left')
+
+            # 데이터 점
+            if ws_arr:
+                ax.scatter(ws_arr, hs_arr, color='#1f77b4',
+                           s=40, alpha=0.85, edgecolors='none', zorder=3)
+
+            ax.set_title(f'{lane_lbl}  {eye_lbl}', fontsize=10, fontweight='bold')
+            ax.set_xlabel('Width (UI)',  fontsize=8)
+            ax.set_ylabel('Height (mV)', fontsize=8)
+            ax.grid(True, linestyle='--', alpha=0.4, zorder=1)
+
+    plt.tight_layout()
+
+    # ── PNG → BytesIO → openpyxl Image 삽입 ────────────────────────
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=120, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+
+    # 기존 이미지 제거 후 데이터 마지막 행 + 2행 아래에 삽입
+    ws._images = []
+    img        = XLImage(buf)
+    img.anchor = f'A{ws.max_row + 2}'
+    ws.add_image(img)
+
+
+# ─────────────────────────────────────────────────────────────────
+# 7. 변환 실행
 # ─────────────────────────────────────────────────────────────────
 
 def append_to_db(base_name: str, all_lane_margins: list, out_dir: str = ''):
@@ -695,6 +805,10 @@ def append_to_db(base_name: str, all_lane_margins: list, out_dir: str = ''):
             ws = wb[sheet_name]
 
         ws.append(data_row)
+
+        # 데이터 저장 후 해당 시트에 분포 차트 갱신 삽입
+        _embed_sheet_chart(ws)
+
         wb.save(db_path)
         print(f"  → DB 저장: {db_path}  [시트: {sheet_name}]")
 
