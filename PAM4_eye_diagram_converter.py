@@ -703,7 +703,7 @@ def _embed_sheet_chart(ws):
             # 데이터 점
             if ws_arr:
                 ax.scatter(ws_arr, hs_arr, color='#1f77b4',
-                           s=40, alpha=0.85, edgecolors='none', zorder=3)
+                           s=10, alpha=0.85, edgecolors='none', zorder=3)
 
             ax.set_title(f'{lane_lbl}  {eye_lbl}', fontsize=10, fontweight='bold')
             ax.set_xlabel('Width (UI)',  fontsize=8)
