@@ -616,7 +616,118 @@ def plot_eye_diagram(ax, data: np.ndarray,
 
 
 # ─────────────────────────────────────────────────────────────────
-# 6. 변환 실행
+# 6. EOM DB 분포 그래프
+# ─────────────────────────────────────────────────────────────────
+
+def plot_db_distribution(db_path: str, out_dir: str = ''):
+    """
+    EOM_DB.xlsx 의 모든 시트 데이터를 읽어 Lane × Eye(Upper/Middle/Lower) 별
+    Width-Height 분포 scatter 그래프를 그리고 PNG 로 저장.
+
+    레이아웃: 2행(Lane0, Lane1) × 3열(Upper, Middle, Lower) = 6개 서브플롯
+        - X축: Width margin (UI)
+        - Y축: Height margin (mV)
+        - 시트(탭)별로 다른 색상/마커로 구분
+        - 저장: out_dir/EOM_DB_distribution.png
+
+    인수:
+        db_path : EOM_DB.xlsx 경로
+        out_dir : 그래프 PNG 저장 폴더
+    """
+    if not _XLSX_AVAILABLE:
+        print("  [경고] openpyxl 미설치 → 분포 그래프 생성 불가")
+        return
+    if not os.path.exists(db_path):
+        print("  [경고] DB 파일 없음 → 분포 그래프 생성 불가")
+        return
+
+    wb = openpyxl.load_workbook(db_path, read_only=True)
+
+    # 시트별 데이터 수집
+    # 컬럼 순서: datetime, input_file,
+    #   lane0_up_w, lane0_up_h, lane0_mid_w, lane0_mid_h, lane0_low_w, lane0_low_h,
+    #   lane1_up_w, lane1_up_h, lane1_mid_w, lane1_mid_h, lane1_low_w, lane1_low_h
+    # → 인덱스: [2]~[13] (0-based)
+    COL_OFFSET = 2   # datetime, input_file 제외 시작 인덱스
+    # (lane_idx, eye_idx) → 컬럼 오프셋: w=6*lane+2*eye, h=6*lane+2*eye+1
+    eye_labels  = ['Upper', 'Middle', 'Lower']
+    lane_labels = ['Lane0', 'Lane1']
+
+    # sheet_name → {(lane, eye): [(w, h), ...]}
+    sheet_data = {}
+    for sname in wb.sheetnames:
+        ws   = wb[sname]
+        rows = list(ws.iter_rows(values_only=True))
+        if len(rows) < 2:
+            continue   # 헤더만 있거나 비어 있음
+        pts = {(li, ei): [] for li in range(2) for ei in range(3)}
+        for row in rows[1:]:   # 헤더 제외
+            for li in range(2):
+                for ei in range(3):
+                    w_col = COL_OFFSET + li * 6 + ei * 2
+                    h_col = w_col + 1
+                    if w_col < len(row) and h_col < len(row):
+                        w = row[w_col]
+                        h = row[h_col]
+                        if w is not None and h is not None:
+                            try:
+                                pts[(li, ei)].append((float(w), float(h)))
+                            except (TypeError, ValueError):
+                                pass
+        sheet_data[sname] = pts
+    wb.close()
+
+    if not sheet_data:
+        print("  [경고] DB 에 유효한 데이터 없음 → 분포 그래프 생성 불가")
+        return
+
+    # 시트별 색상 팔레트 (최대 10개, 이후 반복)
+    palette = [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+    ]
+    sheet_names  = list(sheet_data.keys())
+    color_map    = {s: palette[i % len(palette)] for i, s in enumerate(sheet_names)}
+
+    # 2행 × 3열 서브플롯
+    fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+    fig.suptitle('EOM Margin Distribution  (X: Width [UI] / Y: Height [mV])',
+                 fontsize=14, fontweight='bold')
+
+    for li, lane_lbl in enumerate(lane_labels):
+        for ei, eye_lbl in enumerate(eye_labels):
+            ax = axes[li][ei]
+            ax.set_title(f'{lane_lbl}  {eye_lbl}', fontsize=11, fontweight='bold')
+            ax.set_xlabel('Width (UI)',  fontsize=9)
+            ax.set_ylabel('Height (mV)', fontsize=9)
+            ax.grid(True, linestyle='--', alpha=0.5)
+
+            for sname in sheet_names:
+                pts = sheet_data[sname].get((li, ei), [])
+                if not pts:
+                    continue
+                ws_arr = [p[0] for p in pts]
+                hs_arr = [p[1] for p in pts]
+                ax.scatter(ws_arr, hs_arr,
+                           label=sname,
+                           color=color_map[sname],
+                           s=40, alpha=0.8, edgecolors='none')
+
+            # 범례: 시트가 여러 개일 때만 표시
+            if len(sheet_names) > 1:
+                ax.legend(fontsize=7, loc='best')
+
+    plt.tight_layout()
+
+    save_dir = out_dir if out_dir else os.getcwd()
+    out_path = os.path.join(save_dir, 'EOM_DB_distribution.png')
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  → 분포 그래프 저장: {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# 7. 변환 실행
 # ─────────────────────────────────────────────────────────────────
 
 def append_to_db(base_name: str, all_lane_margins: list, out_dir: str = ''):
@@ -772,7 +883,11 @@ def convert(txt_path: str, csv_paths: list, out_dir: str = None, dpi: int = 150)
         all_lane_margins.append((lane_name, mask_info_list))
 
     # 전체 lane 마진을 DB 에 한 줄로 기록
+    db_path = os.path.join(os.getcwd(), 'EOM_DB.xlsx')
     append_to_db(base_name, all_lane_margins, out_dir)
+
+    # DB 저장 후 분포 그래프 갱신
+    plot_db_distribution(db_path, out_dir)
     print("\n완료!")
 
 
