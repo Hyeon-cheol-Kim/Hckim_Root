@@ -655,7 +655,7 @@ def append_to_db(base_name: str, all_lane_margins: list, out_dir: str = ''):
 
     # 데이터 행: 타임스탬프 + 파일명("Result_" 제거) + 각 Lane 의 6개 마진 값
     input_file_name = re.sub(r'^Result_', '', base_name)
-    data_row = [datetime.now().strftime('%Y%m%d%H%M%S'), input_file_name]
+    data_row = [datetime.now().strftime('%Y/%m/%d/%H/%M/%S'), input_file_name]
     for _, mask_info_list in all_lane_margins:
         for _, w_ui, h_mv in mask_info_list:
             data_row += [round(w_ui, 4), round(h_mv, 2)]   # 숫자 타입 유지 (Excel 계산 가능)
