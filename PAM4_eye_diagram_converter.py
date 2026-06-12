@@ -372,7 +372,7 @@ def build_colormap():
     """
     return mcolors.LinearSegmentedColormap.from_list('eye', [
         (0.0,   '#0000FF'),   # error count = 0  : 파란색
-        (1/63,  '#FFFFFF'),   # error count = 1  : 흰색 (급전환)
+        (1/63,  '#FF0000'),   # error count = 1  : 흰색 (급전환)
         (1.0,   '#FF0000'),   # error count = 63 : 빨간색
     ])
 
