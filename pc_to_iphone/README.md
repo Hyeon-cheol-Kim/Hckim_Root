@@ -13,18 +13,20 @@ USB로 연결된 iPhone에 PC의 파일을 전송하는 데스크톱 GUI 프로�
 
 ## 설치 및 실행
 
-### 1. 환경 요구사항
+### 1. 드라이버 설치 (iTunes 불필요)
 
-| 항목 | 내용 |
-|------|------|
-| OS | Windows 10/11 (macOS·Linux도 지원) |
-| Python | 3.9 이상 |
-| iTunes / Apple 드라이버 | Windows에서 필수 (Microsoft Store 버전 사용 시 별도 드라이버 필요) |
+`pymobiledevice3`는 iTunes 전체 설치 없이 **USB 드라이버**만 있으면 동작합니다.
 
-> **Windows iTunes 설치 방법**  
-> Microsoft Store 버전이 아닌 [Apple 공식 사이트](https://www.apple.com/itunes/)에서 직접 설치를 권장합니다.
+| OS | 드라이버 설치 방법 |
+|----|------------------|
+| **Windows 10/11** | Microsoft Store에서 **"Apple Devices"** 검색 후 무료 설치 (iTunes 불필요) |
+| **macOS** | Finder가 자동으로 처리 — 별도 설치 불필요 |
+| **Linux** | `sudo apt install libimobiledevice-utils usbmuxd` |
 
-### 2. 의존성 설치
+> **Apple Devices 앱** (Windows) = 드라이버만 포함된 경량 패키지입니다.  
+> iTunes를 이미 설치한 경우에도 동작합니다.
+
+### 2. Python 의존성 설치
 
 ```bash
 pip install -r requirements.txt
@@ -63,7 +65,7 @@ python main.py
 
 | 증상 | 해결 방법 |
 |------|----------|
-| 연결 안 됨 | iTunes 재설치, USB 케이블 교체 |
+| 연결 안 됨 | USB 케이블 교체, Apple Devices 앱 재설치 |
 | `신뢰` 창이 안 뜸 | iPhone 잠금 해제 후 재연결 |
-| 권한 오류 | 관리자 권한으로 실행 (`python main.py` → 터미널을 관리자로 열기) |
+| 권한 오류 | 관리자 권한으로 실행 |
 | `libimobiledevice` 오류 | `pip install --upgrade pymobiledevice3` |

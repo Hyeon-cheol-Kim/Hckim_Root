@@ -15,7 +15,7 @@ def get_connected_device():
         name = lockdown.get_value('', 'DeviceName') or 'iPhone'
         udid = lockdown.udid
         return {'name': name, 'udid': udid, 'lockdown': lockdown}
-    except Exception as e:
+    except Exception:
         return None
 
 

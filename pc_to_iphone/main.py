@@ -14,7 +14,6 @@ from transfer import (
     is_allowed,
 )
 
-# 색상 팔레트
 C_BG      = '#1e1e2e'
 C_PANEL   = '#2a2a3e'
 C_ACCENT  = '#4fa3e0'
@@ -23,6 +22,12 @@ C_RED     = '#e74c3c'
 C_TEXT    = '#ecf0f1'
 C_SUBTEXT = '#95a5a6'
 C_BTN     = '#34495e'
+
+
+def _btn(parent, text, cmd, **kw):
+    defaults = dict(bg=C_BTN, fg=C_TEXT, relief=tk.FLAT, padx=8, pady=3, cursor='hand2')
+    defaults.update(kw)
+    return tk.Button(parent, text=text, command=cmd, **defaults)
 
 
 class App(tk.Tk):
@@ -64,14 +69,18 @@ class App(tk.Tk):
         tk.Label(bar, text="기기 상태", font=('Helvetica', 10, 'bold'),
                  fg=C_TEXT, bg=C_PANEL, width=8, anchor='w').pack(side=tk.LEFT, padx=(8, 4))
 
-        self._device_var = tk.StringVar(value="확인 중...")
         self._device_dot = tk.Label(bar, text="●", fg='orange', bg=C_PANEL, font=('Helvetica', 14))
         self._device_dot.pack(side=tk.LEFT, padx=(0, 4))
+
+        self._device_var = tk.StringVar(value="확인 중...")
         tk.Label(bar, textvariable=self._device_var,
                  fg=C_TEXT, bg=C_PANEL, font=('Helvetica', 10)).pack(side=tk.LEFT)
 
-        tk.Button(bar, text="새로고침", command=self._refresh_device,
-                  bg=C_BTN, fg=C_TEXT, relief=tk.FLAT, padx=8).pack(side=tk.RIGHT, padx=8)
+        _btn(bar, "새로고침", self._refresh_device).pack(side=tk.RIGHT, padx=8)
+
+        # iTunes 없는 경우 안내 버튼
+        _btn(bar, "iTunes 없이 설치하는 방법", self._show_driver_help,
+             bg='#2c4a2c', fg='#7ecf7e').pack(side=tk.RIGHT, padx=4)
 
     def _build_file_panel(self):
         outer = tk.LabelFrame(self, text=" 전송 파일 목록 ",
@@ -79,17 +88,12 @@ class App(tk.Tk):
                               font=('Helvetica', 10))
         outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
 
-        # 버튼 줄
         btn_row = tk.Frame(outer, bg=C_BG)
         btn_row.pack(fill=tk.X, pady=(4, 2))
-        for label, cmd in [("+ 파일 추가", self._add_files),
-                           ("− 선택 제거", self._remove_selected),
-                           ("✕ 전체 초기화", self._clear_files)]:
-            tk.Button(btn_row, text=label, command=cmd,
-                      bg=C_BTN, fg=C_TEXT, relief=tk.FLAT,
-                      padx=8, pady=3).pack(side=tk.LEFT, padx=3)
+        _btn(btn_row, "+ 파일 추가",   self._add_files).pack(side=tk.LEFT, padx=3)
+        _btn(btn_row, "− 선택 제거",   self._remove_selected).pack(side=tk.LEFT, padx=3)
+        _btn(btn_row, "✕ 전체 초기화", self._clear_files).pack(side=tk.LEFT, padx=3)
 
-        # 파일 리스트 + 스크롤바
         list_frame = tk.Frame(outer, bg=C_BG)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
@@ -106,7 +110,6 @@ class App(tk.Tk):
         self._listbox.pack(fill=tk.BOTH, expand=True)
         sb.config(command=self._listbox.yview)
 
-        # 파일 개수 표시
         self._count_var = tk.StringVar(value="파일 0개 선택됨")
         tk.Label(outer, textvariable=self._count_var,
                  fg=C_SUBTEXT, bg=C_BG, font=('Helvetica', 9)).pack(anchor='e', padx=4)
@@ -115,26 +118,20 @@ class App(tk.Tk):
         bot = tk.Frame(self, bg=C_BG, pady=4)
         bot.pack(fill=tk.X, padx=8, pady=(0, 8))
 
-        # 전송 경로 안내
         tk.Label(bot, text=f"저장 경로: iPhone 내부 저장소 → {TARGET_FOLDER}/",
                  fg=C_SUBTEXT, bg=C_BG, font=('Helvetica', 9)).pack(anchor='w')
 
-        # 진행 바
         self._progress = ttk.Progressbar(bot, mode='determinate', maximum=100)
         self._progress.pack(fill=tk.X, pady=3)
 
-        # 상태 텍스트
         self._status_var = tk.StringVar(value="준비")
         tk.Label(bot, textvariable=self._status_var,
                  fg=C_SUBTEXT, bg=C_BG, font=('Helvetica', 9)).pack(anchor='w')
 
-        # 전송 버튼
-        self._transfer_btn = tk.Button(
-            bot, text="  iPhone으로 전송  ",
-            command=self._start_transfer,
-            bg=C_GREEN, fg='white',
-            font=('Helvetica', 12, 'bold'),
-            relief=tk.FLAT, pady=6, cursor='hand2')
+        self._transfer_btn = _btn(bot, "  iPhone으로 전송  ",
+                                   self._start_transfer,
+                                   bg=C_GREEN, fg='white',
+                                   font=('Helvetica', 12, 'bold'), pady=6)
         self._transfer_btn.pack(fill=tk.X, pady=(4, 0))
 
     # ── 기기 상태 ────────────────────────────────────────────────────────────
@@ -149,6 +146,24 @@ class App(tk.Tk):
         color = C_GREEN if ok else C_RED
         self.after(0, lambda: self._device_var.set(msg))
         self.after(0, lambda: self._device_dot.config(fg=color))
+
+    def _show_driver_help(self):
+        msg = (
+            "iTunes 없이 iPhone USB 드라이버 설치 방법\n"
+            "─────────────────────────────────────────\n\n"
+            "[Windows 10 / 11]\n"
+            "  Microsoft Store에서 'Apple Devices' 앱을 검색하여\n"
+            "  무료 설치하면 iTunes 없이 드라이버만 설치됩니다.\n\n"
+            "[설치 후]\n"
+            "  iPhone을 USB로 연결 → '신뢰' 버튼 탭 → 새로고침\n\n"
+            "[macOS]\n"
+            "  Finder가 자동으로 드라이버 역할을 하므로\n"
+            "  별도 설치 불필요합니다.\n\n"
+            "[Linux]\n"
+            "  sudo apt install libimobiledevice-utils usbmuxd\n"
+            "  sudo systemctl start usbmuxd"
+        )
+        messagebox.showinfo("iTunes 없이 설치하는 방법", msg)
 
     # ── 파일 조작 ────────────────────────────────────────────────────────────
 
@@ -188,8 +203,7 @@ class App(tk.Tk):
         self._update_count()
 
     def _remove_selected(self):
-        indices = list(self._listbox.curselection())
-        for i in reversed(indices):
+        for i in reversed(self._listbox.curselection()):
             self._listbox.delete(i)
             self.selected_files.pop(i)
         self._update_count()
@@ -200,8 +214,7 @@ class App(tk.Tk):
         self._update_count()
 
     def _update_count(self):
-        n = len(self.selected_files)
-        self._count_var.set(f"파일 {n}개 선택됨")
+        self._count_var.set(f"파일 {len(self.selected_files)}개 선택됨")
 
     # ── 전송 ────────────────────────────────────────────────────────────────
 
@@ -258,7 +271,8 @@ class App(tk.Tk):
                 "확인 사항:\n"
                 "  1. iPhone이 USB로 연결되어 있는지\n"
                 "  2. iPhone에서 '신뢰' 버튼을 눌렀는지\n"
-                "  3. iTunes 또는 Apple 드라이버가 설치되어 있는지"
+                "  3. Apple 드라이버가 설치되어 있는지\n"
+                "     (iTunes 또는 Microsoft Store의 'Apple Devices' 앱)"
             ))
         finally:
             self.after(0, self._reset_btn)
