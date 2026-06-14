@@ -41,10 +41,19 @@ python -m android_ftrace_tool --adb /path/to/adb
    | 계층 | 그룹 | 설명 |
    |------|------|------|
    | 앱 I/O   | `android_fs` | 앱→파일 I/O 매핑(read/write 시작·종료, 경로·inode·오프셋) |
-   | 파일시스템 | `f2fs`    | F2FS 동작(read/write/fsync/truncate(삭제)/discard/GC) |
-   | 블록     | `block`     | 블록 I/O 요청(bio 큐잉, 발행/완료, 병합) |
+   | 파일시스템 | `f2fs`    | F2FS 전반: read/write/fsync, **GC**, checkpoint, discard, truncate(삭제) |
+   | 파일시스템 | `ext4`    | EXT4 동작(/data 가 ext4 인 단말): write/할당/truncate |
+   | 파일시스템 | `erofs`   | EROFS 읽기전용(system/vendor) 읽기 |
+   | 저널링   | `jbd2`      | EXT4 저널링 커밋/체크포인트 |
+   | 라이트백 | `writeback` | 더티 페이지 flush 시점(`balance_dirty_pages`) — 앱 write→block 연결 |
+   | 블록     | `block`     | 블록 I/O 요청(bio 큐잉, 발행/완료, 병합, discard) |
    | SCSI     | `scsi`      | SCSI 명령 디스패치/완료 (UFS 상위 계층) |
    | UFS/UIC  | `ufs`       | UFS 디바이스 명령(`ufshcd_command`) + UIC 계층(`ufshcd_uic_command`) |
+
+   > **GC 등 백그라운드 동작**: f2fs 의 GC·checkpoint·discard 는 `f2fs` 그룹 안의
+   > 개별 이벤트라, `f2fs` 를 켜면(또는 `f` 프리셋) 자동으로 추적됩니다.
+   > 플로우 프리셋(`f`)은 `android_fs → f2fs → writeback → block → scsi → ufs` 를 켭니다
+   > (ext4/erofs/jbd2 는 단말 파일시스템에 따라 메뉴에서 개별 선택).
 
    조작 명령:
    - **번호** — 그룹 전체 on/off 토글

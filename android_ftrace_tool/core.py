@@ -212,23 +212,32 @@ _NON_GROUP_ENTRIES = {"enable", "header_page", "header_event"}
 
 
 # ── 관심 분야(스토리지) 이벤트 그룹 카탈로그 ────────────────────────
-# UFS / SCSI / F2FS / block / android_fs 등 스토리지 스택 관련 ftrace 이벤트
-# 그룹과 한 줄 설명. 위에서 아래로 "앱 → 파일시스템 → 블록 → SCSI → UFS(UIC)"
-# 데이터 플로우 순서로 나열되어 있다(앱의 read/write/erase 가 UFS 디바이스 및
-# UIC 계층까지 내려가는 흐름을 계층별로 추적할 수 있다).
+# 앱 → 파일시스템 → (라이트백) → 블록 → SCSI → UFS(UIC) 데이터 플로우 순서로
+# 나열한 스토리지 관련 ftrace 이벤트 그룹과 한 줄 설명.
 # 설정 단계에서는 이 카탈로그 중 "디바이스가 실제 지원하는" 그룹만 노출한다.
+#
+# 참고: f2fs 의 GC(가비지 컬렉션)·checkpoint·discard 는 별도 그룹이 아니라
+#       'f2fs' 그룹 안의 개별 이벤트(f2fs_gc_begin/end, f2fs_get_victim ...)이다.
+#       즉 'f2fs' 를 켜면 GC 동작도 함께 추적된다.
 # (UI 가 아닌 도메인 지식이므로 core 에 두어 GUI 에서도 재사용 가능)
 STORAGE_EVENT_GROUPS = {
     "android_fs": "앱→파일 I/O 매핑(read/write 시작·종료, 경로·inode·오프셋) — 플로우 최상단",
-    "f2fs":       "F2FS 파일시스템 동작(read/write/fsync/truncate(삭제)/discard/GC) 추적",
-    "block":      "블록 I/O 계층 요청 추적(bio 큐잉, 요청 발행/완료, 병합)",
+    "f2fs":       "F2FS 동작 전반: read/write/fsync, GC(가비지컬렉션), checkpoint, discard, truncate(삭제)",
+    "ext4":       "EXT4 파일시스템 동작(/data 가 ext4 인 단말): write/할당(mballoc)/truncate 등",
+    "erofs":      "EROFS 읽기전용 파일시스템(system/vendor 파티션) 읽기 동작",
+    "jbd2":       "EXT4 저널링(jbd2) 커밋/체크포인트 — ext4 메타데이터 일관성",
+    "writeback":  "더티 페이지 라이트백(페이지캐시→스토리지 flush 시점, balance_dirty_pages)",
+    "block":      "블록 I/O 계층 요청 추적(bio 큐잉, 요청 발행/완료, 병합, discard)",
     "scsi":       "SCSI 명령 디스패치/완료 추적 — UFS 상위 계층",
     "ufs":        "UFS 드라이버: 디바이스 명령(ufshcd_command) + UIC 계층(ufshcd_uic_command) 추적",
 }
 
-# 앱의 파일 동작(read/write/erase)이 UFS/UIC 까지 내려가는 전체 데이터 플로우를
-# 한 번에 켜기 위한 프리셋(카탈로그 순서 = 플로우 순서).
-FLOW_PRESET_ORDER = list(STORAGE_EVENT_GROUPS.keys())
+# 앱의 파일 동작(read/write/erase)이 UFS/UIC 까지 내려가는 전형적인 데이터
+# 플로우를 한 번에 켜기 위한 프리셋(플로우 순서).
+# writeback 을 포함해 "페이지캐시 → 스토리지 flush" 시점까지 끊김 없이 추적한다.
+# (ext4/erofs/jbd2 는 단말 파일시스템에 따라 선택적이므로 프리셋에서는 제외 —
+#  필요하면 메뉴에서 개별 선택)
+FLOW_PRESET_ORDER = ["android_fs", "f2fs", "writeback", "block", "scsi", "ufs"]
 
 # 이벤트 그룹 디렉터리 안에서 개별 이벤트가 아닌 제어 파일들.
 _NON_EVENT_ENTRIES = {"enable", "filter"}
