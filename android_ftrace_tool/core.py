@@ -239,6 +239,31 @@ STORAGE_EVENT_GROUPS = {
 #  필요하면 메뉴에서 개별 선택)
 FLOW_PRESET_ORDER = ["android_fs", "f2fs", "writeback", "block", "scsi", "ufs"]
 
+
+# ── 개별 이벤트 묶음 프리셋 ─────────────────────────────────────────
+# 그룹 전체를 켜면 로그가 폭발하는 경우(예: syscalls), 관심 있는 개별 이벤트만
+# 핀포인트로 켜기 위한 묶음. 각 묶음은 (group, event) 쌍의 리스트.
+# 예) sync 계열 시스템콜은 syscalls 그룹 안에 있지만, 그룹 전체(수백 개)가 아니라
+#     fsync/fdatasync/sync/syncfs/sync_file_range 진입·종료만 켠다.
+# (UI 가 아닌 도메인 지식이므로 core 에 두어 GUI 에서도 재사용 가능)
+EVENT_BUNDLES = {
+    "sync_syscalls": {
+        "desc": "sync 계열 시스템콜 진입/종료 — fsync/fdatasync/sync/syncfs/sync_file_range",
+        "events": [
+            ("syscalls", "sys_enter_fsync"),
+            ("syscalls", "sys_exit_fsync"),
+            ("syscalls", "sys_enter_fdatasync"),
+            ("syscalls", "sys_exit_fdatasync"),
+            ("syscalls", "sys_enter_sync"),
+            ("syscalls", "sys_exit_sync"),
+            ("syscalls", "sys_enter_syncfs"),
+            ("syscalls", "sys_exit_syncfs"),
+            ("syscalls", "sys_enter_sync_file_range"),
+            ("syscalls", "sys_exit_sync_file_range"),
+        ],
+    },
+}
+
 # 이벤트 그룹 디렉터리 안에서 개별 이벤트가 아닌 제어 파일들.
 _NON_EVENT_ENTRIES = {"enable", "filter"}
 

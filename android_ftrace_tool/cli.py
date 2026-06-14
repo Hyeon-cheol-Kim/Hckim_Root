@@ -24,10 +24,10 @@ import argparse
 # 패키지/단일 실행 양쪽을 지원하기 위한 import 처리
 try:
     from .core import (Adb, Ftrace, AdbError, default_log_filename,
-                       STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER)
+                       STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER, EVENT_BUNDLES)
 except ImportError:                       # 직접 실행(python cli.py)인 경우
     from core import (Adb, Ftrace, AdbError, default_log_filename,
-                      STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER)
+                      STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER, EVENT_BUNDLES)
 
 
 # ── 출력 헬퍼 ──────────────────────────────────────────────────────
@@ -185,8 +185,10 @@ def configure_options(ft):
                 print(f"   --) [X] {g:<11} - {d}  (이 디바이스 미지원)")
         print("     ([O]=그룹전체  [~]=일부 이벤트  [ ]=꺼짐)")
 
+        sync_on = "syscalls" in group_state      # sync 묶음 활성 여부(근사)
         print("\n  ── 추가 명령 ──")
         print(f"   f) read/write/erase 플로우 전체 켜기(프리셋)")
+        print(f"   y) sync 시스템콜 추적(fsync/sync/...)  [현재: {'ON' if sync_on else 'OFF'}]")
         print(f"   d) 켜진 그룹의 개별 이벤트 세부 선택(빼기)")
         print(f"   t) tracer 설정       (현재: {current_tracer})")
         print(f"   a) 전체 선택 해제")
@@ -216,6 +218,10 @@ def configure_options(ft):
 
         if cmd == "f":
             _apply_flow_preset(ft, group_state, available)
+            continue
+
+        if cmd == "y":
+            _toggle_event_bundle(ft, group_state, available, "sync_syscalls")
             continue
 
         if cmd == "d":
@@ -280,6 +286,72 @@ def _apply_flow_preset(ft, group_state, available):
         print(f"  (미지원으로 제외: {', '.join(skipped)})")
 
 
+def _toggle_event_bundle(ft, group_state, available, bundle_name):
+    """
+    개별 이벤트 묶음(예: sync 시스템콜)을 한 번에 켜고/끈다.
+    그룹 전체가 아니라 묶음에 정의된 (group, event) 만 핀포인트로 제어하며,
+    group_state 의 "부분 이벤트(set)" 모델에 반영한다.
+    """
+    bundle = EVENT_BUNDLES.get(bundle_name)
+    if not bundle:
+        print(f"  [오류] 알 수 없는 묶음: {bundle_name}")
+        return
+
+    groups_used = sorted({g for g, _ in bundle["events"]})
+    # 묶음이 쓰는 그룹이 디바이스에 있는지 확인
+    for g in groups_used:
+        if g not in available:
+            print(f"  [경고] '{g}' 그룹이 없어 '{bundle['desc']}' 를 켤 수 없습니다.")
+            return
+
+    # 디바이스에 실제 존재하는 이벤트만 대상으로 한다(커널마다 일부 누락 가능).
+    existing = {}
+    for g in groups_used:
+        try:
+            existing[g] = set(ft.list_events_in_group(g))
+        except AdbError as e:
+            print(f"  [오류] '{g}' 이벤트 목록 조회 실패: {e}")
+            return
+    target = [(g, e) for g, e in bundle["events"] if e in existing.get(g, set())]
+    if not target:
+        print("  [경고] 이 디바이스에 해당 이벤트가 없습니다(미지원).")
+        return
+
+    # 현재 켜져 있는지 판단(대상이 모두 켜져 있으면 ON 으로 간주)
+    def _is_on(g, e):
+        st = group_state.get(g)
+        return st == "ALL" or (isinstance(st, set) and e in st)
+    enable = not all(_is_on(g, e) for g, e in target)
+
+    changed = 0
+    for g, e in target:
+        st = group_state.get(g)
+        if enable and st == "ALL":
+            continue                      # 그룹 전체가 이미 켜져 있으면 건드리지 않음
+        if not enable and st == "ALL":
+            print(f"  [안내] '{g}' 그룹이 전체 ON 상태라 묶음만 끌 수 없습니다."
+                  f" 그룹을 끄려면 메뉴에서 '{g}' 를 토글하세요.")
+            return
+        try:
+            ft.enable_event(g, e, enable)
+        except AdbError as ex:
+            print(f"    [오류] {g}/{e} 설정 실패: {ex}")
+            continue
+        s = st if isinstance(st, set) else set()
+        if enable:
+            s.add(e)
+            group_state[g] = s
+        else:
+            s.discard(e)
+            if s:
+                group_state[g] = s
+            else:
+                group_state.pop(g, None)
+        changed += 1
+
+    print(f"  '{bundle['desc']}' {'켜짐' if enable else '꺼짐'} ({changed}개 이벤트 적용)")
+
+
 def _detail_events(ft, group_state):
     """켜진 그룹 하나를 골라 개별 이벤트를 세부 토글한다(불필요 이벤트 빼기)."""
     enabled_groups = sorted(group_state)
@@ -306,6 +378,15 @@ def _detail_events(ft, group_state):
     # 현재 켜진 이벤트 집합 계산
     st = group_state[group]
     enabled = set(events) if st == "ALL" else set(st)
+
+    # syscalls 처럼 이벤트가 매우 많은 그룹은 전부 나열하면 화면이 폭발한다.
+    # 이 경우 현재 켜진 이벤트만 보여줘서(빼기 위주) 다룰 수 있게 한다.
+    if len(events) > 50:
+        print(f"  ('{group}' 은 이벤트가 {len(events)}개로 많아, 현재 켜진 것만 표시합니다)")
+        events = sorted(enabled)
+        if not events:
+            print("  켜진 개별 이벤트가 없습니다.")
+            return
 
     while True:
         print(f"\n  ── '{group}' 개별 이벤트 (번호=포함/제외 토글) ──")
