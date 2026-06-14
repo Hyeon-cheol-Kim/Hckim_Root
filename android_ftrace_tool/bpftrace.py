@@ -133,6 +133,92 @@ def list_scripts():
     return "\n".join(out)
 
 
+# ── 커널 eBPF 준비도 점검 ──────────────────────────────────────────
+# (이름, 필수여부, 설명) — required=True 인데 꺼져 있으면 fail 로 본다.
+KERNEL_CONFIGS = [
+    ("CONFIG_BPF_SYSCALL", True, "bpf() 시스템콜(필수)"),
+    ("CONFIG_BPF_EVENTS", True, "tracepoint/kprobe 에 BPF 연결(필수)"),
+    ("CONFIG_DEBUG_INFO_BTF", False, "BTF/CO-RE(kprobe 스크립트에 강력 권장)"),
+    ("CONFIG_KPROBES", False, "kprobe 기반 스크립트(vfs_* 등)"),
+    ("CONFIG_FTRACE_SYSCALLS", False, "syscall tracepoint"),
+    ("CONFIG_UPROBES", False, "uprobe(유저공간, 선택)"),
+]
+
+_SYM = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
+
+
+def check_readiness(adb, bpftrace_bin=None):
+    """
+    디바이스의 eBPF/bpftrace 실행 준비도를 점검해 (label, status, detail) 목록 반환.
+    status 는 'ok'/'warn'/'fail'. 순수 로직이라 GUI 에서도 재사용 가능.
+    """
+    items = []
+
+    uid = adb.shell("id -u", check=False).strip()
+    root_ok = (uid == "0")
+    items.append(("root 권한",
+                  "ok" if root_ok else ("warn" if adb.use_su else "fail"),
+                  f"uid={uid or '?'}" + (" (su 우회 설정됨)" if adb.use_su else "")))
+
+    ver = adb.shell("uname -r", check=False).strip()
+    items.append(("커널 버전", "ok" if ver else "warn", ver or "확인 불가"))
+
+    btf = adb.shell("test -e /sys/kernel/btf/vmlinux && echo OK", check=False)
+    items.append(("BTF vmlinux", "ok" if "OK" in btf else "warn",
+                  "/sys/kernel/btf/vmlinux 있음 (CO-RE 가능)" if "OK" in btf
+                  else "없음 → kprobe 스크립트가 제한될 수 있음"))
+
+    ton = adb.shell("test -e /sys/kernel/tracing/tracing_on && echo OK", check=False)
+    items.append(("tracefs", "ok" if "OK" in ton else "warn",
+                  "마운트됨" if "OK" in ton else "기본 경로에 없음"))
+
+    cfg = adb.shell("zcat /proc/config.gz 2>/dev/null", check=False)
+    if cfg.strip():
+        present = {}
+        for line in cfg.splitlines():
+            line = line.strip()
+            if line.startswith("CONFIG_") and "=" in line:
+                k, v = line.split("=", 1)
+                present[k] = v
+        for name, required, why in KERNEL_CONFIGS:
+            v = present.get(name)
+            on = v in ("y", "m")
+            status = "ok" if on else ("fail" if required else "warn")
+            items.append((name, status,
+                          (f"={v}" if v else "미설정") + f" — {why}"))
+    else:
+        items.append(("/proc/config.gz", "warn",
+                      "없음 → 커널 config 확인 불가(빌드에서 미노출)"))
+
+    if bpftrace_bin:
+        ex = adb.shell(f"test -x {bpftrace_bin} && echo OK", check=False)
+        if "OK" in ex:
+            vout = adb.shell(f"{bpftrace_bin} --version 2>&1 | head -1",
+                             check=False).strip()
+            items.append(("bpftrace 바이너리", "ok",
+                          f"{bpftrace_bin} 실행 가능 ({vout})"))
+        else:
+            items.append(("bpftrace 바이너리", "fail",
+                          f"{bpftrace_bin} 없음/실행불가 → push·chmod 필요"))
+    return items
+
+
+def format_readiness(items):
+    """check_readiness 결과를 사람이 읽는 문자열로."""
+    lines = ["커널 eBPF 준비도 점검:"]
+    for label, status, detail in items:
+        lines.append(f"  {_SYM.get(status, '?')} {label:<22} {detail}")
+    lines.append("")
+    if any(s == "fail" for _, s, _ in items):
+        lines.append("  결론: ❌ 필수 항목 미충족 — bpftrace 실행이 어렵습니다.")
+        lines.append("        ftrace 기반(g/h/analyzer)을 쓰거나 커널을 재빌드하세요.")
+    elif any(s == "warn" for _, s, _ in items):
+        lines.append("  결론: ⚠️ 동작은 가능하나 일부 스크립트(특히 kprobe)가 제한될 수 있습니다.")
+    else:
+        lines.append("  결론: ✅ bpftrace 사용 준비 완료.")
+    return "\n".join(lines)
+
+
 def generate(name):
     """스크립트 본문 문자열을 반환(없으면 KeyError 메시지)."""
     if name not in BPF_SCRIPTS:
@@ -187,6 +273,11 @@ def main(argv=None):
 
     sub.add_parser("list", help="스크립트 목록")
 
+    p_chk = sub.add_parser("check", help="커널 eBPF 준비도 점검")
+    p_chk.add_argument("--bpftrace", help="디바이스의 bpftrace 경로(있으면 함께 점검)")
+    p_chk.add_argument("-s", "--serial", help="대상 디바이스 시리얼")
+    p_chk.add_argument("--su", action="store_true", help="su -c 로 권한 우회")
+
     p_show = sub.add_parser("show", help="스크립트 본문 출력")
     p_show.add_argument("name")
 
@@ -207,6 +298,20 @@ def main(argv=None):
     if args.cmd == "list" or args.cmd is None:
         print(list_scripts())
         return 0
+
+    if args.cmd == "check":
+        try:
+            from .core import Adb, AdbError
+        except ImportError:
+            from core import Adb, AdbError
+        adb = Adb(serial=args.serial, use_su=args.su)
+        try:
+            items = check_readiness(adb, bpftrace_bin=args.bpftrace)
+        except AdbError as e:
+            print(f"[오류] 점검 실패: {e}")
+            return 1
+        print(format_readiness(items))
+        return 0 if not any(s == "fail" for _, s, _ in items) else 1
 
     if args.name not in BPF_SCRIPTS:
         print(f"[오류] 알 수 없는 스크립트: {args.name}\n")

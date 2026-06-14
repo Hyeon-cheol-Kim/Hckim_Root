@@ -5,6 +5,9 @@ Android(리눅스) 커널이 지원하는 **ftrace** trace 로그를 골라서 �
 
 PC 와 Android 폰을 USB(adb)로 연결한 뒤 실행하면 됩니다.
 
+> 📖 **모든 기능·사용법·예시는 [`MANUAL.md`](MANUAL.md) 참고.**
+> bpftrace 바이너리 빌드는 [`../tools/bpftrace-android/`](../tools/bpftrace-android/).
+
 ---
 
 ## 요구 사항
