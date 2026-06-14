@@ -212,17 +212,26 @@ _NON_GROUP_ENTRIES = {"enable", "header_page", "header_event"}
 
 
 # ── 관심 분야(스토리지) 이벤트 그룹 카탈로그 ────────────────────────
-# UFS / SCSI / F2FS / block 등 스토리지 스택 관련 ftrace 이벤트 그룹과
-# 한 줄 설명. 설정 단계에서는 이 카탈로그 중 "디바이스가 실제 지원하는"
-# 그룹만 선택지로 보여준다.
-# 향후 다른 관심 분야(메모리, 스케줄러 등)를 추가하려면 이 dict 만 늘리면 된다.
+# UFS / SCSI / F2FS / block / android_fs 등 스토리지 스택 관련 ftrace 이벤트
+# 그룹과 한 줄 설명. 위에서 아래로 "앱 → 파일시스템 → 블록 → SCSI → UFS(UIC)"
+# 데이터 플로우 순서로 나열되어 있다(앱의 read/write/erase 가 UFS 디바이스 및
+# UIC 계층까지 내려가는 흐름을 계층별로 추적할 수 있다).
+# 설정 단계에서는 이 카탈로그 중 "디바이스가 실제 지원하는" 그룹만 노출한다.
 # (UI 가 아닌 도메인 지식이므로 core 에 두어 GUI 에서도 재사용 가능)
 STORAGE_EVENT_GROUPS = {
-    "ufs":   "UFS 호스트 컨트롤러 동작(명령 전송/완료, 클럭 게이팅·스케일링, 전원관리) 추적",
-    "scsi":  "SCSI 명령 디스패치/완료 추적 — UFS는 SCSI 계층 위에서 동작",
-    "f2fs":  "F2FS 파일시스템 동작(읽기/쓰기, fsync, GC, 체크포인트 등) 추적",
-    "block": "블록 I/O 계층 요청 추적(요청 발행/완료, bio 병합·큐잉)",
+    "android_fs": "앱→파일 I/O 매핑(read/write 시작·종료, 경로·inode·오프셋) — 플로우 최상단",
+    "f2fs":       "F2FS 파일시스템 동작(read/write/fsync/truncate(삭제)/discard/GC) 추적",
+    "block":      "블록 I/O 계층 요청 추적(bio 큐잉, 요청 발행/완료, 병합)",
+    "scsi":       "SCSI 명령 디스패치/완료 추적 — UFS 상위 계층",
+    "ufs":        "UFS 드라이버: 디바이스 명령(ufshcd_command) + UIC 계층(ufshcd_uic_command) 추적",
 }
+
+# 앱의 파일 동작(read/write/erase)이 UFS/UIC 까지 내려가는 전체 데이터 플로우를
+# 한 번에 켜기 위한 프리셋(카탈로그 순서 = 플로우 순서).
+FLOW_PRESET_ORDER = list(STORAGE_EVENT_GROUPS.keys())
+
+# 이벤트 그룹 디렉터리 안에서 개별 이벤트가 아닌 제어 파일들.
+_NON_EVENT_ENTRIES = {"enable", "filter"}
 
 
 class Ftrace:
@@ -308,6 +317,24 @@ class Ftrace:
     def enable_event_group(self, group, enable=True):
         """이벤트 그룹 전체를 on/off (events/<group>/enable 에 1/0 기록)."""
         self._write(f"events/{group}/enable", "1" if enable else "0")
+
+    def list_events_in_group(self, group):
+        """
+        그룹에 속한 개별 이벤트 이름 목록을 정렬해 반환한다.
+        (events/<group>/ 의 하위 디렉터리들 — enable/filter 제어파일은 제외)
+        예) ufs → [ufshcd_command, ufshcd_uic_command, ufshcd_clk_gating, ...]
+        """
+        out = self.adb.shell(f"ls {self._path('events', group)}", check=False)
+        events = []
+        for name in out.split():
+            name = name.strip()
+            if name and name not in _NON_EVENT_ENTRIES:
+                events.append(name)
+        return sorted(events)
+
+    def enable_event(self, group, event, enable=True):
+        """그룹 내 개별 이벤트 하나만 on/off (events/<group>/<event>/enable)."""
+        self._write(f"events/{group}/{event}/enable", "1" if enable else "0")
 
     def set_tracer(self, tracer):
         """current_tracer 를 설정(function_graph 등). 'nop' 으로 해제."""

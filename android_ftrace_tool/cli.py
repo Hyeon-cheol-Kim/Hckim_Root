@@ -24,10 +24,10 @@ import argparse
 # 패키지/단일 실행 양쪽을 지원하기 위한 import 처리
 try:
     from .core import (Adb, Ftrace, AdbError, default_log_filename,
-                       STORAGE_EVENT_GROUPS)
+                       STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER)
 except ImportError:                       # 직접 실행(python cli.py)인 경우
     from core import (Adb, Ftrace, AdbError, default_log_filename,
-                      STORAGE_EVENT_GROUPS)
+                      STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER)
 
 
 # ── 출력 헬퍼 ──────────────────────────────────────────────────────
@@ -132,27 +132,42 @@ def prepare_ftrace(adb):
 # ╚══════════════════════════════════════════════════════════════════╝
 def configure_options(ft):
     """
-    스토리지(UFS/SCSI/F2FS/block) 관련 ftrace 이벤트 그룹과 tracer 를 출력하고,
-    '설정완료'를 고르기 전까지 토글하며 즉시 enable/disable 한다.
+    스토리지 데이터 플로우(앱→F2FS→block→SCSI→UFS/UIC) 관련 ftrace 이벤트 그룹과
+    tracer 를 설정한다. '설정완료' 전까지 즉시 enable/disable 한다.
 
-    선택지는 STORAGE_EVENT_GROUPS 카탈로그 중 "디바이스가 실제 지원하는" 그룹만
-    노출한다. 'x' 로 전체 그룹 보기(고급)로 전환할 수 있다.
+    명령:
+      번호 : 그룹 전체 on/off 토글
+      f    : read/write/erase 플로우 전체 켜기(프리셋, 앱→UFS/UIC)
+      d    : 켜진 그룹의 개별 이벤트 세부 선택(불필요 이벤트 빼기)
+      x    : 전체 그룹 보기(고급)  t: tracer  a: 전체 해제  s: 설정완료
+
+    반환: (group_state, tracer)
+      group_state: dict { group -> "ALL" | set(개별 이벤트 이름) }
+                   "ALL"=그룹 전체, set=일부 이벤트만 켜진 상태.
     """
-    banner("2단계: ftrace 옵션 설정 (스토리지: UFS / SCSI / F2FS / block)")
+    banner("2단계: ftrace 옵션 설정 (스토리지 플로우: 앱→F2FS→block→SCSI→UFS/UIC)")
     available = set(ft.list_event_groups())          # 디바이스 지원 그룹 전체
     tracers = ft.list_available_tracers()
 
-    # 카탈로그를 (지원 / 미지원) 으로 분리
+    # 카탈로그를 (지원 / 미지원) 으로 분리 (카탈로그 순서 = 플로우 순서)
     options = [(g, d) for g, d in STORAGE_EVENT_GROUPS.items() if g in available]
     missing = [(g, d) for g, d in STORAGE_EVENT_GROUPS.items() if g not in available]
 
     if not options:
-        print("  [경고] 이 디바이스에서 UFS/SCSI/F2FS/block 관련 이벤트 그룹을")
-        print("         찾지 못했습니다. 'x' 로 전체 그룹을 확인할 수 있습니다.")
+        print("  [경고] 이 디바이스에서 스토리지 관련 이벤트 그룹을 찾지 못했습니다.")
+        print("         'x' 로 전체 그룹을 확인할 수 있습니다.")
 
-    selected = set()                      # 현재 enable 된 그룹 집합
+    group_state = {}                      # group -> "ALL" or set(events)
     current_tracer = "nop"
     show_all = False                      # True 면 전체 그룹 보기(고급)
+
+    def _mark(g):
+        st = group_state.get(g)
+        if st == "ALL":
+            return "[O]"                  # 그룹 전체
+        if isinstance(st, set) and st:
+            return "[~]"                  # 일부 이벤트만
+        return "[ ]"                      # 꺼짐
 
     while True:
         # 화면에 보여줄 목록(display)과 번호 매핑을 구성한다.
@@ -160,43 +175,51 @@ def configure_options(ft):
             display = sorted(available)
             print("\n  ── 전체 이벤트 그룹 (번호=on/off 토글) ──")
             for i, g in enumerate(display, 1):
-                mark = "[O]" if g in selected else "[ ]"
-                print(f"   {i:>3}) {mark} {g}")
+                print(f"   {i:>3}) {_mark(g)} {g}")
         else:
             display = [g for g, _ in options]
-            print("\n  ── 스토리지 이벤트 그룹 (번호=on/off 토글) ──")
+            print("\n  ── 스토리지 플로우 이벤트 그룹 (위→아래 = 앱→UFS) ──")
             for i, (g, d) in enumerate(options, 1):
-                mark = "[O]" if g in selected else "[ ]"
-                print(f"   {i}) {mark} {g:<6} - {d}")
-            # 카탈로그에 있으나 이 디바이스가 지원하지 않는 그룹도 안내한다.
+                print(f"   {i}) {_mark(g)} {g:<11} - {d}")
             for g, d in missing:
-                print(f"   --) [X] {g:<6} - {d}  (이 디바이스 미지원)")
+                print(f"   --) [X] {g:<11} - {d}  (이 디바이스 미지원)")
+        print("     ([O]=그룹전체  [~]=일부 이벤트  [ ]=꺼짐)")
 
         print("\n  ── 추가 명령 ──")
+        print(f"   f) read/write/erase 플로우 전체 켜기(프리셋)")
+        print(f"   d) 켜진 그룹의 개별 이벤트 세부 선택(빼기)")
         print(f"   t) tracer 설정       (현재: {current_tracer})")
         print(f"   a) 전체 선택 해제")
         print(f"   x) {'스토리지만 보기' if show_all else '전체 그룹 보기(고급)'}")
         print(f"   s) 설정완료 → 다음 단계")
-        print(f"   현재 선택: {sorted(selected) if selected else '(없음)'}")
+        print(f"   현재 선택: {_summarize_state(group_state)}")
 
         cmd = ask("\n  선택", "s").strip().lower()
 
         if cmd == "s":
-            if not selected and current_tracer == "nop":
+            if not group_state and current_tracer == "nop":
                 cont = ask("  선택된 옵션이 없습니다. 그래도 진행할까요? (y/n)", "n")
                 if cont.lower() != "y":
                     continue
-            return selected, current_tracer
+            return group_state, current_tracer
 
         if cmd == "a":
             # 전체 해제 → 디바이스에서도 모두 disable
-            for g in list(selected):
+            for g in list(group_state):
                 try:
                     ft.enable_event_group(g, False)
                 except AdbError as e:
                     print(f"    [오류] {g} 해제 실패: {e}")
-            selected.clear()
+            group_state.clear()
             print("  모든 이벤트 그룹을 해제했습니다.")
+            continue
+
+        if cmd == "f":
+            _apply_flow_preset(ft, group_state, available)
+            continue
+
+        if cmd == "d":
+            _detail_events(ft, group_state)
             continue
 
         if cmd == "x":
@@ -208,23 +231,121 @@ def configure_options(ft):
             current_tracer = ft.get_tracer()
             continue
 
-        # 숫자 입력 → 현재 화면(display) 기준 해당 그룹 토글
+        # 숫자 입력 → 현재 화면(display) 기준 해당 그룹 토글(전체 on/off)
         if cmd.isdigit() and 1 <= int(cmd) <= len(display):
             g = display[int(cmd) - 1]
             try:
-                if g in selected:
+                if g in group_state:
                     ft.enable_event_group(g, False)
-                    selected.discard(g)
+                    del group_state[g]
                     print(f"    [ ] {g} 비활성화됨")
                 else:
                     ft.enable_event_group(g, True)
-                    selected.add(g)
-                    print(f"    [O] {g} 활성화됨")
+                    group_state[g] = "ALL"
+                    print(f"    [O] {g} 활성화됨(전체)")
             except AdbError as e:
                 print(f"    [오류] {g} 설정 실패: {e}")
             continue
 
         print("  올바른 입력이 아닙니다.")
+
+
+def _summarize_state(group_state):
+    """group_state 를 사람이 읽기 좋은 한 줄 요약 문자열로 만든다."""
+    if not group_state:
+        return "(없음)"
+    parts = []
+    for g in sorted(group_state):
+        st = group_state[g]
+        parts.append(g if st == "ALL" else f"{g}({len(st)}개 이벤트)")
+    return ", ".join(parts)
+
+
+def _apply_flow_preset(ft, group_state, available):
+    """앱→F2FS→block→SCSI→UFS 플로우 그룹을 한 번에 켠다(디바이스 지원분만)."""
+    applied, skipped = [], []
+    for g in FLOW_PRESET_ORDER:
+        if g not in available:
+            skipped.append(g)
+            continue
+        try:
+            ft.enable_event_group(g, True)
+            group_state[g] = "ALL"
+            applied.append(g)
+        except AdbError as e:
+            print(f"    [오류] {g} 활성화 실패: {e}")
+    if applied:
+        print(f"  플로우 프리셋 활성화: {' → '.join(applied)}")
+    if skipped:
+        print(f"  (미지원으로 제외: {', '.join(skipped)})")
+
+
+def _detail_events(ft, group_state):
+    """켜진 그룹 하나를 골라 개별 이벤트를 세부 토글한다(불필요 이벤트 빼기)."""
+    enabled_groups = sorted(group_state)
+    if not enabled_groups:
+        print("  먼저 그룹을 하나 이상 켜야 세부 선택이 가능합니다.")
+        return
+    print("\n  세부 선택할 그룹:")
+    for i, g in enumerate(enabled_groups, 1):
+        print(f"   {i}) {g}")
+    sel = ask("  그룹 번호 (엔터=취소)", "")
+    if not (sel.isdigit() and 1 <= int(sel) <= len(enabled_groups)):
+        return
+    group = enabled_groups[int(sel) - 1]
+
+    try:
+        events = ft.list_events_in_group(group)
+    except AdbError as e:
+        print(f"  [오류] 이벤트 목록 조회 실패: {e}")
+        return
+    if not events:
+        print("  이 그룹에 개별 이벤트가 없습니다.")
+        return
+
+    # 현재 켜진 이벤트 집합 계산
+    st = group_state[group]
+    enabled = set(events) if st == "ALL" else set(st)
+
+    while True:
+        print(f"\n  ── '{group}' 개별 이벤트 (번호=포함/제외 토글) ──")
+        for i, ev in enumerate(events, 1):
+            mark = "[O]" if ev in enabled else "[ ]"
+            print(f"   {i:>3}) {mark} {ev}")
+        print("   c) 완료(상위 메뉴로)")
+        c = ask("  선택", "c").strip().lower()
+        if c == "c":
+            break
+        if c.isdigit() and 1 <= int(c) <= len(events):
+            ev = events[int(c) - 1]
+            try:
+                if ev in enabled:
+                    ft.enable_event(group, ev, False)
+                    enabled.discard(ev)
+                    print(f"    [ ] {ev} 제외")
+                else:
+                    ft.enable_event(group, ev, True)
+                    enabled.add(ev)
+                    print(f"    [O] {ev} 포함")
+            except AdbError as e:
+                print(f"    [오류] {ev} 설정 실패: {e}")
+            continue
+        print("  올바른 입력이 아닙니다.")
+
+    # 상태 반영: 전체면 "ALL", 일부면 set, 모두 빠지면 그룹 제거
+    if not enabled:
+        try:
+            ft.enable_event_group(group, False)
+        except AdbError:
+            pass
+        del group_state[group]
+        print(f"  '{group}' 의 모든 이벤트가 제외되어 그룹을 껐습니다.")
+    elif enabled == set(events):
+        group_state[group] = "ALL"
+        print(f"  '{group}' 전체 이벤트 포함 상태입니다.")
+    else:
+        group_state[group] = enabled
+        print(f"  '{group}' 에서 {len(enabled)}/{len(events)}개 이벤트만 켜졌습니다.")
 
 
 def _choose_tracer(ft, tracers):
@@ -332,7 +453,7 @@ def _check_writable(fname):
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║ 단계 4) 캡처 실행                                                  ║
 # ╚══════════════════════════════════════════════════════════════════╝
-def run_capture(ft, selected, tracer, fname):
+def run_capture(ft, group_state, tracer, fname):
     """ftrace 로그 캡처를 시작하고 사용자가 멈출 때까지 저장한다."""
     banner("4단계: ftrace 로그 캡처")
 
@@ -341,7 +462,7 @@ def run_capture(ft, selected, tracer, fname):
         "Android ftrace capture",
         f"tracefs   : {ft.tracefs}",
         f"tracer    : {tracer}",
-        f"events    : {', '.join(sorted(selected)) if selected else '(none)'}",
+        f"events    : {_summarize_state(group_state)}",
         f"buffer_kb : {ft.get_buffer_size_kb()} KB/CPU",
     ]
 
@@ -407,11 +528,11 @@ def main(argv=None):
         # 준비) root + tracefs
         ft = prepare_ftrace(adb)
         # 2) 옵션 설정
-        selected, tracer = configure_options(ft)
+        group_state, tracer = configure_options(ft)
         # 3) 준비 + 파일명
         fname = prepare_capture(ft)
         # 4) 캡처
-        run_capture(ft, selected, tracer, fname)
+        run_capture(ft, group_state, tracer, fname)
     except AdbError as e:
         print(f"\n[오류] {e}")
         return 1
