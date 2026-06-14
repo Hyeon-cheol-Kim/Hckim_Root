@@ -16,7 +16,9 @@ UI 분리 설계(요구사항 #4):
   동일한 core.py 함수들을 호출하면 된다. 로직 수정은 필요 없다.
 """
 
+import os
 import sys
+import time
 import argparse
 
 # 패키지/단일 실행 양쪽을 지원하기 위한 import 처리
@@ -33,10 +35,32 @@ def banner(title):
     print(f"\n{line}\n  {title}\n{line}")
 
 
+# 연속 EOF 횟수. 입력 스트림이 끝난 상태에서 재프롬프트 루프가 무한히
+# 도는 것을 막기 위한 안전장치.
+_eof_streak = 0
+_EOF_LIMIT = 3
+
+
 def ask(prompt, default=None):
-    """입력을 받되 빈 입력이면 default 를 반환한다."""
+    """
+    입력을 받되 빈 입력이면 default 를 반환한다.
+
+    EOF(Ctrl-D, 파이프 입력 종료) 처리:
+      - 처음 몇 번은 default 를 돌려줘 자동화(echo ... | tool)를 지원한다.
+      - 연속 EOF 가 _EOF_LIMIT 회를 넘으면 EOFError 를 올려, 같은 기본값을
+        반복 반환해 무한 루프에 빠지는 것을 막는다.
+    """
+    global _eof_streak
     suffix = f" [{default}]" if default is not None else ""
-    val = input(f"{prompt}{suffix}: ").strip()
+    try:
+        val = input(f"{prompt}{suffix}: ").strip()
+    except EOFError:
+        _eof_streak += 1
+        print()
+        if _eof_streak >= _EOF_LIMIT:
+            raise
+        return default if default is not None else "q"
+    _eof_streak = 0                       # 정상 입력 시 카운터 리셋
     return val if val else (default if default is not None else "")
 
 
@@ -211,13 +235,69 @@ def prepare_capture(ft):
     after = ft.maximize_buffer()
     print(f"  ring buffer: {before} KB → {after} KB/CPU 로 최대화")
 
-    # 저장 파일명 입력
+    # 저장 파일명 입력 (검증 루프)
     default_name = default_log_filename()
-    fname = ask("  저장할 로그 파일명", default_name)
-    if not fname.lower().endswith(".log"):
-        fname += ".log"
+    while True:
+        fname = ask("  저장할 로그 파일명", default_name)
+        ok, result = _validate_filename(fname, default_name)
+        if not ok:
+            print(f"    [오류] {result}  다시 입력하세요.")
+            continue
+        fname = result
+        # 이미 존재하면 덮어쓰기 확인
+        if os.path.exists(fname):
+            ow = ask(f"    '{fname}' 파일이 이미 있습니다. 덮어쓸까요? (y/n)", "n")
+            if ow.lower() != "y":
+                continue
+        # 실제 쓰기 가능 여부 확인(디렉터리 권한/존재)
+        writable, err = _check_writable(fname)
+        if not writable:
+            print(f"    [오류] {err}  다시 입력하세요.")
+            continue
+        break
+
     print(f"  저장 파일: {fname}")
     return fname
+
+
+# 파일명에 쓸 수 없는 문자(Windows 호환 포함)
+_INVALID_FNAME_CHARS = set('<>:"|?*')
+
+
+def _validate_filename(fname, default_name):
+    """
+    파일명을 검증/정규화한다.
+    반환: (성공여부, 정규화된 파일명 또는 오류메시지)
+    """
+    fname = (fname or "").strip().strip('"').strip("'")
+    if not fname:
+        fname = default_name
+    # 경로 구분자는 허용하되, 파일명 자체의 금지문자만 검사한다.
+    base = os.path.basename(fname)
+    if not base:
+        return False, "파일명이 비어 있습니다(디렉터리만 지정됨)."
+    bad = _INVALID_FNAME_CHARS & set(base)
+    if bad:
+        return False, f"파일명에 사용할 수 없는 문자 포함: {''.join(sorted(bad))}"
+    if base in (".", ".."):
+        return False, "올바른 파일명이 아닙니다."
+    if not fname.lower().endswith(".log"):
+        fname += ".log"
+    return True, fname
+
+
+def _check_writable(fname):
+    """저장 경로에 실제로 파일을 만들 수 있는지(권한/디렉터리) 확인한다."""
+    folder = os.path.dirname(os.path.abspath(fname))
+    if not os.path.isdir(folder):
+        # 폴더가 없으면 만들 수 있는지 시도
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as e:
+            return False, f"저장 폴더를 만들 수 없습니다: {folder} ({e})"
+    if not os.access(folder, os.W_OK):
+        return False, f"저장 폴더에 쓰기 권한이 없습니다: {folder}"
+    return True, ""
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
@@ -237,22 +317,39 @@ def run_capture(ft, selected, tracer, fname):
     ]
 
     print("  캡처를 시작합니다. 중지하려면 Enter 키를 누르세요...")
+    # start_capture 실패(파일 열기/프로세스 실행 등)는 AdbError 로 올라온다.
     session = ft.start_capture(fname, header_lines=header)
 
+    # 캡처 스레드가 곧바로 죽었는지(예: 디바이스 분리, trace_pipe 접근 불가) 확인
+    time.sleep(0.3)
+    if not session.is_alive() and session.line_count == 0:
+        session.stop()
+        err = f" ({session.error})" if session.error else ""
+        print(f"  [경고] 캡처가 즉시 종료되었습니다{err}.")
+        print("         root 권한 또는 trace_pipe 접근 가능 여부를 확인하세요.")
+
+    count = 0
     try:
         # Enter 입력 시까지 대기. 그 사이 백그라운드 스레드가 파일에 기록한다.
         input()
-    except KeyboardInterrupt:
-        print("\n  (Ctrl-C 감지) 캡처를 종료합니다...")
+    except (KeyboardInterrupt, EOFError):
+        print("\n  (중단 신호 감지) 캡처를 종료합니다...")
+    finally:
+        # 어떤 경우에도 반드시 캡처를 정지해 디바이스 tracing_on 을 끈다.
+        count = session.stop()
 
-    count = session.stop()
+    if session.error:
+        print(f"  [경고] 캡처 중 오류 발생: {session.error}")
     print(f"  캡처 종료. {count} 줄 저장됨 → {fname}")
 
     # 정리: 이벤트/트레이서 원복
     cleanup = ask("  디바이스 ftrace 설정을 원복할까요? (y/n)", "y")
     if cleanup.lower() == "y":
-        ft.disable_all_events()
-        print("  ftrace 설정을 원복했습니다.")
+        try:
+            ft.disable_all_events()
+            print("  ftrace 설정을 원복했습니다.")
+        except AdbError as e:
+            print(f"  [경고] 원복 중 오류(무시): {e}")
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
@@ -269,15 +366,15 @@ def main(argv=None):
     print("║  Android ftrace 로그 수집 도구 (CLI)" + " " * 21 + "║")
     print("╚" + "═" * 58 + "╝")
 
-    # 1) 디바이스 선택
-    serial = select_device(args.adb)
-    if not serial:
-        print("종료합니다.")
-        return 1
-
-    adb = Adb(adb_path=args.adb, serial=serial)
-
     try:
+        # 1) 디바이스 선택
+        serial = select_device(args.adb)
+        if not serial:
+            print("종료합니다.")
+            return 1
+
+        adb = Adb(adb_path=args.adb, serial=serial)
+
         # 준비) root + tracefs
         ft = prepare_ftrace(adb)
         # 2) 옵션 설정
@@ -292,6 +389,13 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("\n사용자 중단으로 종료합니다.")
         return 130
+    except EOFError:
+        print("\n입력이 종료되어 프로그램을 마칩니다.")
+        return 1
+    except Exception as e:
+        # 예기치 못한 모든 예외를 사용자에게 간결히 알린다(트레이스백 노출 방지).
+        print(f"\n[예기치 못한 오류] {type(e).__name__}: {e}")
+        return 1
 
     print("\n완료되었습니다.")
     return 0

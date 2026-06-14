@@ -114,6 +114,14 @@ class Adb:
             )
         except subprocess.TimeoutExpired:
             raise AdbError(f"adb 명령 시간 초과: {' '.join(full)}")
+        except PermissionError:
+            raise AdbError(
+                f"adb 실행 권한이 없습니다: '{self.adb_path}'. "
+                "실행 권한(chmod +x)을 확인하세요."
+            )
+        except OSError as e:
+            # 그 외 시스템 수준 오류(메모리 부족, 파일 핸들 고갈 등)
+            raise AdbError(f"adb 실행 중 시스템 오류: {e}")
 
         if check and proc.returncode != 0:
             raise AdbError(
@@ -163,7 +171,9 @@ class Adb:
         use_su=True 이면 root 권한이 필요한 명령을 'su -c' 로 감싼다.
         """
         if self.use_su:
-            command = f"su -c '{command}'"
+            # 명령에 작은따옴표가 있으면 su -c '...' 래핑이 깨지므로 이스케이프한다.
+            safe = command.replace("'", "'\\''")
+            command = f"su -c '{safe}'"
         proc = self._run(["shell", command], timeout=timeout, check=check)
         return proc.stdout
 
@@ -304,7 +314,13 @@ class Ftrace:
 
     def set_buffer_size_kb(self, kb):
         """CPU 당 ring buffer 크기(KB)를 설정한다."""
-        self._write("buffer_size_kb", str(int(kb)))
+        try:
+            kb = int(kb)
+        except (TypeError, ValueError):
+            raise AdbError(f"버퍼 크기는 정수여야 합니다: {kb!r}")
+        if kb <= 0:
+            raise AdbError(f"버퍼 크기는 1 이상이어야 합니다: {kb}")
+        self._write("buffer_size_kb", str(kb))
 
     def maximize_buffer(self, target_kb=65536):
         """
@@ -314,6 +330,8 @@ class Ftrace:
         넉넉히 큰 값(target_kb, 기본 64MB/CPU)을 요청한 뒤 실제 적용된 값을
         읽어서 반환한다.
         """
+        if target_kb <= 0:
+            raise AdbError(f"target_kb 는 1 이상이어야 합니다: {target_kb}")
         try:
             self.set_buffer_size_kb(target_kb)
         except AdbError:
@@ -397,35 +415,68 @@ class CaptureSession:
         self._proc = None                 # adb 캡처 프로세스
         self._thread = None               # 파일 기록 스레드
         self._running = False
+        self._stopped = False             # stop() 중복 호출 방지
+        self._file = None                 # 열린 로그 파일 핸들
         self.line_count = 0               # 저장된 줄 수(진행 표시용)
+        self.error = None                 # 캡처 중 발생한 예외(있으면 저장)
 
     def start(self):
-        """캡처 프로세스와 기록 스레드를 시작한다."""
-        # 저장 폴더가 없으면 생성한다.
-        folder = os.path.dirname(os.path.abspath(self.local_path))
-        if folder and not os.path.isdir(folder):
-            os.makedirs(folder, exist_ok=True)
+        """
+        캡처 프로세스와 기록 스레드를 시작한다.
 
+        파일 열기/폴더 생성/프로세스 실행 실패는 여기서 즉시 예외로 던져
+        호출측(UI)이 인지할 수 있게 한다. (스레드 안에서 조용히 죽지 않도록)
+        """
+        # 1) 저장 폴더 생성 — 권한/경로 오류를 호출측에 알린다.
+        folder = os.path.dirname(os.path.abspath(self.local_path))
+        try:
+            if folder and not os.path.isdir(folder):
+                os.makedirs(folder, exist_ok=True)
+        except OSError as e:
+            raise AdbError(f"저장 폴더를 만들 수 없습니다: {folder} ({e})")
+
+        # 2) 로그 파일을 먼저 열어 쓰기 가능 여부를 즉시 확인한다.
+        try:
+            self._file = open(self.local_path, "w",
+                              encoding="utf-8", errors="replace")
+        except OSError as e:
+            raise AdbError(f"로그 파일을 열 수 없습니다: {self.local_path} ({e})")
+
+        # 3) 메타데이터 헤더 기록
+        try:
+            for h in self.header_lines:
+                self._file.write(f"# {h}\n")
+            self._file.flush()
+        except OSError as e:
+            self._file.close()
+            raise AdbError(f"로그 파일 기록 실패: {self.local_path} ({e})")
+
+        # 4) adb 캡처 프로세스 실행
         cmd = self.adb._base() + ["shell", f"cat {self.pipe_path}"]
-        self._proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            errors="replace",
-            bufsize=1,                    # 라인 버퍼링
-        )
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                errors="replace",
+                bufsize=1,                # 라인 버퍼링
+            )
+        except OSError as e:
+            self._file.close()
+            raise AdbError(f"adb 캡처 프로세스 실행 실패: {e}")
+
         self._running = True
         self._thread = threading.Thread(target=self._pump, daemon=True)
         self._thread.start()
 
     def _pump(self):
-        """trace_pipe 스트림을 읽어 파일에 기록하는 내부 루프."""
-        with open(self.local_path, "w", encoding="utf-8", errors="replace") as f:
-            # 메타데이터 헤더 기록
-            for h in self.header_lines:
-                f.write(f"# {h}\n")
-            f.flush()
+        """
+        trace_pipe 스트림을 읽어 파일에 기록하는 내부 루프.
+        스레드 안에서 발생한 예외는 self.error 에 저장해 stop() 시 확인 가능하게 한다.
+        """
+        f = self._file
+        try:
             for line in self._proc.stdout:
                 if not self._running:
                     break
@@ -435,11 +486,29 @@ class CaptureSession:
                 if self.line_count % 200 == 0:
                     f.flush()
                 if self.on_line:
-                    self.on_line(line)
-            f.flush()
+                    # 콜백 예외가 캡처를 중단시키지 않도록 격리한다(GUI 안전).
+                    try:
+                        self.on_line(line)
+                    except Exception:
+                        pass
+        except (OSError, ValueError) as e:
+            # ValueError: 파일이 외부에서 닫힌 경우 등
+            self.error = e
+        finally:
+            try:
+                f.flush()
+            except Exception:
+                pass
+
+    def is_alive(self):
+        """캡처 스레드가 살아있는지 여부(조기 종료 감지용)."""
+        return self._thread is not None and self._thread.is_alive()
 
     def stop(self):
-        """캡처를 종료하고 디바이스의 tracing_on 을 끈다."""
+        """캡처를 종료하고 디바이스의 tracing_on 을 끈다. (중복 호출 안전)"""
+        if self._stopped:
+            return self.line_count
+        self._stopped = True
         self._running = False
         # 디바이스 수집 정지 → trace_pipe 가 더 이상 데이터를 내보내지 않음
         if self.ftrace is not None:
@@ -459,6 +528,12 @@ class CaptureSession:
                     pass
         if self._thread is not None:
             self._thread.join(timeout=5)
+        # 파일 핸들 정리
+        if self._file is not None:
+            try:
+                self._file.close()
+            except Exception:
+                pass
         return self.line_count
 
 
