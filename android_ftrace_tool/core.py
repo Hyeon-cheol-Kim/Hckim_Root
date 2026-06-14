@@ -211,6 +211,20 @@ TRACEFS_CANDIDATES = [
 _NON_GROUP_ENTRIES = {"enable", "header_page", "header_event"}
 
 
+# ── 관심 분야(스토리지) 이벤트 그룹 카탈로그 ────────────────────────
+# UFS / SCSI / F2FS / block 등 스토리지 스택 관련 ftrace 이벤트 그룹과
+# 한 줄 설명. 설정 단계에서는 이 카탈로그 중 "디바이스가 실제 지원하는"
+# 그룹만 선택지로 보여준다.
+# 향후 다른 관심 분야(메모리, 스케줄러 등)를 추가하려면 이 dict 만 늘리면 된다.
+# (UI 가 아닌 도메인 지식이므로 core 에 두어 GUI 에서도 재사용 가능)
+STORAGE_EVENT_GROUPS = {
+    "ufs":   "UFS 호스트 컨트롤러 동작(명령 전송/완료, 클럭 게이팅·스케일링, 전원관리) 추적",
+    "scsi":  "SCSI 명령 디스패치/완료 추적 — UFS는 SCSI 계층 위에서 동작",
+    "f2fs":  "F2FS 파일시스템 동작(읽기/쓰기, fsync, GC, 체크포인트 등) 추적",
+    "block": "블록 I/O 계층 요청 추적(요청 발행/완료, bio 병합·큐잉)",
+}
+
+
 class Ftrace:
     """
     Android 커널 ftrace 를 제어하는 핵심 클래스.

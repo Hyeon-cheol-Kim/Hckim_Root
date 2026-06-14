@@ -23,9 +23,11 @@ import argparse
 
 # 패키지/단일 실행 양쪽을 지원하기 위한 import 처리
 try:
-    from .core import Adb, Ftrace, AdbError, default_log_filename
+    from .core import (Adb, Ftrace, AdbError, default_log_filename,
+                       STORAGE_EVENT_GROUPS)
 except ImportError:                       # 직접 실행(python cli.py)인 경우
-    from core import Adb, Ftrace, AdbError, default_log_filename
+    from core import (Adb, Ftrace, AdbError, default_log_filename,
+                      STORAGE_EVENT_GROUPS)
 
 
 # ── 출력 헬퍼 ──────────────────────────────────────────────────────
@@ -130,27 +132,50 @@ def prepare_ftrace(adb):
 # ╚══════════════════════════════════════════════════════════════════╝
 def configure_options(ft):
     """
-    설정 가능한 이벤트 그룹과 tracer 를 출력하고,
+    스토리지(UFS/SCSI/F2FS/block) 관련 ftrace 이벤트 그룹과 tracer 를 출력하고,
     '설정완료'를 고르기 전까지 토글하며 즉시 enable/disable 한다.
+
+    선택지는 STORAGE_EVENT_GROUPS 카탈로그 중 "디바이스가 실제 지원하는" 그룹만
+    노출한다. 'x' 로 전체 그룹 보기(고급)로 전환할 수 있다.
     """
-    banner("2단계: ftrace 옵션 설정")
-    groups = ft.list_event_groups()
+    banner("2단계: ftrace 옵션 설정 (스토리지: UFS / SCSI / F2FS / block)")
+    available = set(ft.list_event_groups())          # 디바이스 지원 그룹 전체
     tracers = ft.list_available_tracers()
 
-    if not groups:
-        print("  [경고] 사용 가능한 이벤트 그룹을 찾지 못했습니다.")
+    # 카탈로그를 (지원 / 미지원) 으로 분리
+    options = [(g, d) for g, d in STORAGE_EVENT_GROUPS.items() if g in available]
+    missing = [(g, d) for g, d in STORAGE_EVENT_GROUPS.items() if g not in available]
+
+    if not options:
+        print("  [경고] 이 디바이스에서 UFS/SCSI/F2FS/block 관련 이벤트 그룹을")
+        print("         찾지 못했습니다. 'x' 로 전체 그룹을 확인할 수 있습니다.")
+
     selected = set()                      # 현재 enable 된 그룹 집합
     current_tracer = "nop"
+    show_all = False                      # True 면 전체 그룹 보기(고급)
 
     while True:
-        print("\n  ── 이벤트 그룹 (번호 입력 시 on/off 토글) ──")
-        for i, g in enumerate(groups, 1):
-            mark = "[O]" if g in selected else "[ ]"
-            print(f"   {i:>3}) {mark} {g}")
+        # 화면에 보여줄 목록(display)과 번호 매핑을 구성한다.
+        if show_all:
+            display = sorted(available)
+            print("\n  ── 전체 이벤트 그룹 (번호=on/off 토글) ──")
+            for i, g in enumerate(display, 1):
+                mark = "[O]" if g in selected else "[ ]"
+                print(f"   {i:>3}) {mark} {g}")
+        else:
+            display = [g for g, _ in options]
+            print("\n  ── 스토리지 이벤트 그룹 (번호=on/off 토글) ──")
+            for i, (g, d) in enumerate(options, 1):
+                mark = "[O]" if g in selected else "[ ]"
+                print(f"   {i}) {mark} {g:<6} - {d}")
+            # 카탈로그에 있으나 이 디바이스가 지원하지 않는 그룹도 안내한다.
+            for g, d in missing:
+                print(f"   --) [X] {g:<6} - {d}  (이 디바이스 미지원)")
 
         print("\n  ── 추가 명령 ──")
         print(f"   t) tracer 설정       (현재: {current_tracer})")
         print(f"   a) 전체 선택 해제")
+        print(f"   x) {'스토리지만 보기' if show_all else '전체 그룹 보기(고급)'}")
         print(f"   s) 설정완료 → 다음 단계")
         print(f"   현재 선택: {sorted(selected) if selected else '(없음)'}")
 
@@ -174,14 +199,18 @@ def configure_options(ft):
             print("  모든 이벤트 그룹을 해제했습니다.")
             continue
 
+        if cmd == "x":
+            show_all = not show_all
+            continue
+
         if cmd == "t":
             _choose_tracer(ft, tracers)
             current_tracer = ft.get_tracer()
             continue
 
-        # 숫자 입력 → 해당 그룹 토글
-        if cmd.isdigit() and 1 <= int(cmd) <= len(groups):
-            g = groups[int(cmd) - 1]
+        # 숫자 입력 → 현재 화면(display) 기준 해당 그룹 토글
+        if cmd.isdigit() and 1 <= int(cmd) <= len(display):
+            g = display[int(cmd) - 1]
             try:
                 if g in selected:
                     ft.enable_event_group(g, False)

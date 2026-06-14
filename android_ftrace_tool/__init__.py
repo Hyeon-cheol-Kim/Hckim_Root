@@ -12,7 +12,9 @@ Android 커널 ftrace 로그를 선택/수집/저장하는 도구.
   python -m android_ftrace_tool
 """
 
-from .core import Adb, Ftrace, CaptureSession, Device, AdbError
+from .core import (Adb, Ftrace, CaptureSession, Device, AdbError,
+                   STORAGE_EVENT_GROUPS)
 
-__all__ = ["Adb", "Ftrace", "CaptureSession", "Device", "AdbError"]
+__all__ = ["Adb", "Ftrace", "CaptureSession", "Device", "AdbError",
+           "STORAGE_EVENT_GROUPS"]
 __version__ = "0.1.0"
