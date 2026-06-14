@@ -197,6 +197,12 @@ class Adb:
         self._run(["pull", remote, local], timeout=timeout, check=True)
         return local
 
+    # ── 파일 보내기 ───────────────────────────────────────────────
+    def push(self, local, remote, timeout=300):
+        """로컬 local 파일을 디바이스 remote 경로로 올려보낸다."""
+        self._run(["push", local, remote], timeout=timeout, check=True)
+        return remote
+
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║ ftrace 제어                                                        ║

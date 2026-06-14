@@ -127,6 +127,33 @@ write 의 비동기 writeback 때문). 대신 아래 **조인 키**로 상관시
 **권장 사용**: 지연·상관 수치는 `h`(B) + analyzer(C) 조합, 동기 read 경로의 인과를
 눈으로 따라가려면 `g`(A) 를 쓰세요.
 
+### 정밀(1:1) 대안 — bpftrace 스크립트 생성기
+
+ftrace 로그 후처리(analyzer)는 best-effort 매칭입니다. **진짜 1:1 상관과 정확한
+지연**이 필요하면 bpftrace 가 더 강력합니다 — eBPF 로 **커널 안에서** 조인 키
+(`sector`/`tag`/`tid`)별 맵을 잡아 그 자리에서 지연을 계산하므로 로그 파싱이
+필요 없습니다. 이를 위한 스크립트 생성기를 제공합니다.
+
+```bash
+python -m android_ftrace_tool.bpftrace list                 # 스크립트 목록
+python -m android_ftrace_tool.bpftrace show block_latency   # 본문 보기
+python -m android_ftrace_tool.bpftrace save ufs_latency -o ufslat.bt
+# 디바이스에 push 후 10초 실행(루트 + 디바이스의 bpftrace 바이너리 필요)
+python -m android_ftrace_tool.bpftrace run block_latency \
+       --bpftrace /data/local/tmp/bpftrace --duration 10 [-s SERIAL] [--su]
+```
+
+| 스크립트 | 조인 키 | 산출 |
+|----------|---------|------|
+| `block_latency` | (dev, sector) | 블록 왕복 지연을 **제출 comm·rwbs별** 히스토그램 |
+| `ufs_latency` | tag (send↔complete) | UFS device 지연을 **opcode별** 히스토그램 |
+| `vfs_rw_latency` | tid | vfs read/write 동기 경로 지연(프로세스별) |
+| `read_to_device` | 같은 tid | `read()` 구간에 발생한 block 제출을 귀속(동기 read 인과) |
+
+전제: 루팅(su)/`adb root` + eBPF·BTF 지원 커널 + 디바이스의 bpftrace 바이너리.
+`ufs`/`f2fs` tracepoint 인자 이름은 커널마다 달라, 스크립트 상단 주석의 "필드 확인"
+안내(`.../events/ufs/ufshcd_command/format`)대로 `args.*` 를 맞추면 됩니다.
+
 ## 아키텍처 (UI / 로직 분리)
 
 향후 **Windows GUI 도구**로 확장할 것을 고려해, 화면 출력과 로직을 분리했습니다.
@@ -135,6 +162,8 @@ write 의 비동기 writeback 때문). 대신 아래 **조인 키**로 상관시
 |------|------|
 | `core.py` | adb 통신 + ftrace 제어 **순수 로직**. `print`/`input` 없음. GUI 에서 그대로 재사용. |
 | `cli.py`  | 대화형 **콘솔 UI**. 모든 출력/입력이 여기 격리됨. |
+| `analyzer.py` | 저장된 `.log` **사후 상관 분석**(UFS↔block↔파일 스티칭, 지연 리포트). 독립 실행. |
+| `bpftrace.py` | **커널-내 1:1 상관** bpftrace 스크립트 생성/실행기. 독립 실행. |
 | `__main__.py` | `python -m android_ftrace_tool` 진입점. |
 
 ### GUI 확장 시
