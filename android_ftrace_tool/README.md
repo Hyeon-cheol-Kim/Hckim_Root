@@ -61,6 +61,8 @@ python -m android_ftrace_tool --adb /path/to/adb
    - **`y`** — **sync 시스템콜 추적** on/off (아래 "sync 추적" 참고)
    - **`d`** — 켜진 그룹의 **개별 이벤트 세부 선택**(예: `ufs` 에서 클럭/전원 이벤트만
      빼고 `ufshcd_command`·`ufshcd_uic_command` 만 남기기) → 표시는 `[~]`(일부)
+   - **`g`** — **function_graph I/O 인과 보기**(아래 "로그 간 상관" 참고)
+   - **`h`** — **상관 트리거**(block I/O 지연 → `io_latency` 합성 이벤트)
    - **`x`** — 전체 그룹 보기(고급), **`t`** — tracer, **`a`** — 전체 해제, **`s`** — 설정완료
 
    **sync 추적**: `fsync`/`sync` 동작은 계층마다 다른 이벤트로 나타납니다.
@@ -88,6 +90,42 @@ python -m android_ftrace_tool --adb /path/to/adb
 기록됩니다.
 
 ---
+
+## 로그 간 상관(연결) 분석 — read ↔ UFS command 등
+
+ftrace 는 기본적으로 "시간순으로 나열된 독립 이벤트"이며, 계층을 관통하는 단일
+상관 ID가 없습니다. 따라서 **묶음으로 켜는 것만으로 "이 read() → 이 ufshcd_command"
+라는 1:1 인과를 로그만으로 보장할 수는 없습니다**(read 캐시 히트/리드어헤드/병합,
+write 의 비동기 writeback 때문). 대신 아래 **조인 키**로 상관시킵니다.
+
+| 구간 | 조인 키 |
+|------|---------|
+| block ↔ scsi ↔ ufs | **sector / LBA** (device sector = LBA × 논리블록/512, 보통 ×8) |
+| 파일 ↔ 블록 | **`f2fs_map_blocks` 의 m_pblk(파일 물리블록) + 파티션 오프셋** |
+| 앱 ↔ 파일 | **inode(ino) + 파일 오프셋** (`android_fs`/`f2fs`) |
+
+이를 돕는 4가지 수단을 제공합니다.
+
+- **(A) `g` — function_graph I/O 인과 보기**: 동기 제출 경로를 **호출 중첩**으로
+  보여줘 `vfs_read → f2fs_…read → submit_bio → scsi → ufshcd_queuecommand` 가 한
+  덩어리로 보입니다. 범위는 `core.py` 의 `IO_GRAPH_FUNCTIONS` 로 한정됩니다.
+  (로그 형식이 이벤트 방식과 달라 analyzer 대상은 아님)
+- **(B) `h` — hist/synthetic 상관 트리거**: `block_rq_issue`↔`complete` 를
+  `(dev,sector)` 로 **커널에서 조인**해 지연을 `io_latency` 합성 이벤트로 로그에
+  남깁니다. `CONFIG_HIST_TRIGGERS`/`CONFIG_SYNTH_EVENTS` 필요(best-effort).
+- **(C) 사후 분석 스크립트(analyzer)**: 저장된 `.log` 를 파싱해 위 조인 키로
+  **UFS↔block↔파일을 자동 스티칭**하고 지연/요약 리포트를 만듭니다.
+  ```bash
+  python -m android_ftrace_tool.analyzer capture.log            # 화면 출력
+  python -m android_ftrace_tool.analyzer capture.log -o report.txt --limit 100
+  ```
+  리포트 예: opcode 분류별 device 지연 요약 + `[UFS WRITE_10 LBA=… dev_lat=…]
+  ↔ block sector=… comm=… ↔ 파일(추정) ino=… path=…` 체인.
+- **(D) 조인 키/한계**: 위 표와 이 문단이 그 문서입니다. "파일(추정)" 은
+  best-effort 매칭이며 1:1 인과를 보장하지 않습니다.
+
+**권장 사용**: 지연·상관 수치는 `h`(B) + analyzer(C) 조합, 동기 read 경로의 인과를
+눈으로 따라가려면 `g`(A) 를 쓰세요.
 
 ## 아키텍처 (UI / 로직 분리)
 

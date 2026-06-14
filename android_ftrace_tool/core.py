@@ -264,6 +264,41 @@ EVENT_BUNDLES = {
     },
 }
 
+
+# ── (A) function_graph 로 I/O 인과(호출 중첩)를 보기 위한 진입 함수 ──
+# function_graph tracer 는 함수 호출 트리를 들여쓰기로 보여준다. 아래 진입
+# 함수들로 범위를 한정하면 "vfs_read → f2fs_…read → submit_bio → scsi → ufshcd"
+# 같은 동기 제출 경로의 인과(중첩)를 한 덩어리로 볼 수 있다.
+# (디바이스에 실제 존재하는 함수만 set_graph_function 에 적용된다)
+IO_GRAPH_FUNCTIONS = [
+    "vfs_read", "vfs_write", "vfs_fsync", "vfs_fsync_range",
+    "f2fs_file_read_iter", "f2fs_file_write_iter",
+    "ext4_file_read_iter", "ext4_file_write_iter",
+    "f2fs_write_data_pages", "do_writepages",
+    "blk_mq_submit_bio", "submit_bio",
+    "scsi_queue_rq", "ufshcd_queuecommand",
+]
+
+# ── (B) hist/synthetic 상관 트리거 프리셋 ───────────────────────────
+# 두 이벤트를 공유 키(dev,sector)로 커널에서 조인해 지연(latency)을 산출하고,
+# 그 결과를 합성(synthetic) 이벤트로 만들어 같은 로그에 남긴다.
+# 커널에 CONFIG_HIST_TRIGGERS / CONFIG_SYNTH_EVENTS 가 필요하다(best-effort,
+# 문법은 커널 버전에 따라 다를 수 있음).
+CORRELATION_TRIGGERS = {
+    "block_io_latency": {
+        "desc": "block_rq_issue↔complete 를 (dev,sector)로 조인해 io_latency 합성 이벤트 생성",
+        "synthetic": "io_latency u64 lat; u64 dev; u64 sector",
+        "triggers": [
+            ("block", "block_rq_issue",
+             "hist:keys=dev,sector:ts0=common_timestamp.usecs"),
+            ("block", "block_rq_complete",
+             "hist:keys=dev,sector:lat=common_timestamp.usecs-$ts0:"
+             "onmatch(block.block_rq_issue).io_latency($lat,dev,sector)"),
+        ],
+        "result_event": ("synthetic", "io_latency"),
+    },
+}
+
 # 이벤트 그룹 디렉터리 안에서 개별 이벤트가 아닌 제어 파일들.
 _NON_EVENT_ENTRIES = {"enable", "filter"}
 
@@ -286,6 +321,8 @@ class Ftrace:
     def __init__(self, adb, tracefs=None):
         self.adb = adb
         self.tracefs = tracefs        # detect_tracefs() 로 채워짐
+        self._installed_triggers = []  # (group, event, trigger) — 정리용 추적
+        self._installed_synth = []     # 생성한 synthetic 이벤트 이름 — 정리용
 
     # ── tracefs 경로 탐지 ─────────────────────────────────────────
     def detect_tracefs(self):
@@ -369,6 +406,84 @@ class Ftrace:
     def enable_event(self, group, event, enable=True):
         """그룹 내 개별 이벤트 하나만 on/off (events/<group>/<event>/enable)."""
         self._write(f"events/{group}/{event}/enable", "1" if enable else "0")
+
+    # ── (A) function_graph: I/O 인과(호출 중첩) 보기 ──────────────
+    def set_graph_functions(self, funcs):
+        """
+        set_graph_function 을 주어진 함수 목록으로 설정한다.
+        디바이스에 존재하지 않는 함수는 커널이 거부하므로, 적용에 성공한 함수만
+        리스트로 반환한다(범위 한정으로 로그 폭발 방지).
+        """
+        gf = self._path("set_graph_function")
+        self.adb.shell(f"echo > {gf}", check=False)      # 먼저 비운다
+        applied = []
+        for fn in funcs:
+            out = self.adb.shell(f"echo {fn} >> {gf} && echo OK", check=False)
+            if out.strip().endswith("OK"):
+                applied.append(fn)
+        return applied
+
+    def clear_graph_functions(self):
+        """set_graph_function 을 비워 function_graph 범위 제한을 해제한다."""
+        self.adb.shell(f"echo > {self._path('set_graph_function')}", check=False)
+
+    # ── (B) hist/synthetic 상관 트리거 ────────────────────────────
+    def create_synthetic_event(self, definition):
+        """synthetic_events 에 합성 이벤트를 정의한다(예: 'io_latency u64 lat; ...')."""
+        self.adb.shell(f"echo '{definition}' >> {self._path('synthetic_events')}",
+                       check=True)
+
+    def remove_synthetic_event(self, name):
+        """이름으로 합성 이벤트를 제거한다."""
+        self.adb.shell(f"echo '!{name}' >> {self._path('synthetic_events')}",
+                       check=False)
+
+    def set_event_trigger(self, group, event, trigger):
+        """이벤트에 hist 등 트리거를 설치한다(events/<group>/<event>/trigger)."""
+        self.adb.shell(
+            f"echo '{trigger}' > {self._path('events', group, event, 'trigger')}",
+            check=True)
+
+    def clear_event_trigger(self, group, event, trigger):
+        """설치한 트리거를 제거한다('!' 접두로 동일 문자열 기록)."""
+        self.adb.shell(
+            f"echo '!{trigger}' > {self._path('events', group, event, 'trigger')}",
+            check=False)
+
+    def apply_correlation_preset(self, name):
+        """
+        CORRELATION_TRIGGERS 프리셋을 설치한다(synthetic 이벤트 + hist 트리거).
+        설치 항목은 추적해 두었다가 remove_correlation_presets() 로 정리한다.
+        실패하면 부분 설치분을 롤백하고 AdbError 를 올린다.
+        반환: 결과(합성) 이벤트 (group, event) 또는 None.
+        """
+        preset = CORRELATION_TRIGGERS[name]
+        try:
+            if preset.get("synthetic"):
+                self.create_synthetic_event(preset["synthetic"])
+                self._installed_synth.append(preset["synthetic"].split()[0])
+            for g, e, trig in preset["triggers"]:
+                self.set_event_trigger(g, e, trig)
+                self._installed_triggers.append((g, e, trig))
+        except AdbError:
+            self.remove_correlation_presets()   # 부분 설치 롤백
+            raise
+        res = preset.get("result_event")
+        if res:
+            try:
+                self.enable_event(res[0], res[1], True)  # 결과 이벤트를 캡처에 포함
+            except AdbError:
+                pass
+        return res
+
+    def remove_correlation_presets(self):
+        """설치한 모든 상관 트리거와 합성 이벤트를 제거한다."""
+        for g, e, trig in reversed(self._installed_triggers):
+            self.clear_event_trigger(g, e, trig)
+        self._installed_triggers = []
+        for name in self._installed_synth:
+            self.remove_synthetic_event(name)
+        self._installed_synth = []
 
     def set_tracer(self, tracer):
         """current_tracer 를 설정(function_graph 등). 'nop' 으로 해제."""
@@ -459,9 +574,12 @@ class Ftrace:
 
     # ── 정리(원복) ────────────────────────────────────────────────
     def disable_all_events(self):
-        """모든 이벤트를 끄고 tracer 를 nop 으로 되돌린다(정리용)."""
+        """모든 이벤트/트리거/그래프설정을 끄고 tracer 를 nop 으로 되돌린다(정리용)."""
+        # 상관 트리거·합성 이벤트 먼저 제거(이벤트보다 먼저 떼야 안전)
+        self.remove_correlation_presets()
         self.adb.shell(f"echo 0 > {self._path('events/enable')}", check=False)
         self.adb.shell(f"echo nop > {self._path('current_tracer')}", check=False)
+        self.clear_graph_functions()
         self.adb.shell(f"echo 0 > {self._path('tracing_on')}", check=False)
 
 

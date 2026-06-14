@@ -24,10 +24,12 @@ import argparse
 # 패키지/단일 실행 양쪽을 지원하기 위한 import 처리
 try:
     from .core import (Adb, Ftrace, AdbError, default_log_filename,
-                       STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER, EVENT_BUNDLES)
+                       STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER, EVENT_BUNDLES,
+                       IO_GRAPH_FUNCTIONS, CORRELATION_TRIGGERS)
 except ImportError:                       # 직접 실행(python cli.py)인 경우
     from core import (Adb, Ftrace, AdbError, default_log_filename,
-                      STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER, EVENT_BUNDLES)
+                      STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER, EVENT_BUNDLES,
+                      IO_GRAPH_FUNCTIONS, CORRELATION_TRIGGERS)
 
 
 # ── 출력 헬퍼 ──────────────────────────────────────────────────────
@@ -186,10 +188,14 @@ def configure_options(ft):
         print("     ([O]=그룹전체  [~]=일부 이벤트  [ ]=꺼짐)")
 
         sync_on = "syscalls" in group_state      # sync 묶음 활성 여부(근사)
+        graph_on = (current_tracer == "function_graph")
+        corr_on = bool(ft._installed_triggers)   # 상관 트리거 설치 여부
         print("\n  ── 추가 명령 ──")
         print(f"   f) read/write/erase 플로우 전체 켜기(프리셋)")
         print(f"   y) sync 시스템콜 추적(fsync/sync/...)  [현재: {'ON' if sync_on else 'OFF'}]")
         print(f"   d) 켜진 그룹의 개별 이벤트 세부 선택(빼기)")
+        print(f"   g) function_graph I/O 인과 보기(호출 중첩)  [현재: {'ON' if graph_on else 'OFF'}]")
+        print(f"   h) 상관 트리거: block I/O 지연(io_latency 합성)  [현재: {'ON' if corr_on else 'OFF'}]")
         print(f"   t) tracer 설정       (현재: {current_tracer})")
         print(f"   a) 전체 선택 해제")
         print(f"   x) {'스토리지만 보기' if show_all else '전체 그룹 보기(고급)'}")
@@ -213,7 +219,10 @@ def configure_options(ft):
                 except AdbError as e:
                     print(f"    [오류] {g} 해제 실패: {e}")
             group_state.clear()
-            print("  모든 이벤트 그룹을 해제했습니다.")
+            # 상관 트리거/합성 이벤트도 함께 정리
+            if ft._installed_triggers:
+                ft.remove_correlation_presets()
+            print("  모든 이벤트 그룹/상관 트리거를 해제했습니다.")
             continue
 
         if cmd == "f":
@@ -226,6 +235,14 @@ def configure_options(ft):
 
         if cmd == "d":
             _detail_events(ft, group_state)
+            continue
+
+        if cmd == "g":
+            current_tracer = _toggle_graph_io(ft, current_tracer)
+            continue
+
+        if cmd == "h":
+            _toggle_correlation(ft, "block_io_latency")
             continue
 
         if cmd == "x":
@@ -350,6 +367,55 @@ def _toggle_event_bundle(ft, group_state, available, bundle_name):
         changed += 1
 
     print(f"  '{bundle['desc']}' {'켜짐' if enable else '꺼짐'} ({changed}개 이벤트 적용)")
+
+
+def _toggle_graph_io(ft, current_tracer):
+    """(A) function_graph 로 I/O 인과(호출 중첩)를 보는 모드 on/off. 새 tracer 반환."""
+    if current_tracer == "function_graph":
+        try:
+            ft.set_tracer("nop")
+            ft.clear_graph_functions()
+        except AdbError as e:
+            print(f"  [오류] 해제 실패: {e}")
+            return current_tracer
+        print("  function_graph I/O 보기 해제(tracer=nop)")
+        return "nop"
+
+    # function_graph 지원 확인
+    if "function_graph" not in ft.list_available_tracers():
+        print("  [경고] 이 커널은 function_graph tracer 를 지원하지 않습니다.")
+        return current_tracer
+    try:
+        ft.set_tracer("function_graph")
+        applied = ft.set_graph_functions(IO_GRAPH_FUNCTIONS)
+    except AdbError as e:
+        print(f"  [오류] function_graph 설정 실패: {e}")
+        return current_tracer
+    if applied:
+        print(f"  function_graph I/O 보기 ON — 범위 함수 {len(applied)}개: {', '.join(applied)}")
+    else:
+        print("  function_graph ON(범위 제한 함수가 없어 전체 호출이 잡혀 로그가 많을 수 있음)")
+    print("  ※ 이 모드는 동기 제출 경로의 인과(중첩)를 보여줍니다. 로그 형식이")
+    print("    이벤트 방식과 달라 사후 분석 스크립트(analyzer) 대상이 아닙니다.")
+    return "function_graph"
+
+
+def _toggle_correlation(ft, preset_name):
+    """(B) hist/synthetic 상관 트리거 프리셋 on/off (block I/O 지연 → io_latency)."""
+    preset = CORRELATION_TRIGGERS[preset_name]
+    if ft._installed_triggers:
+        ft.remove_correlation_presets()
+        print(f"  상관 트리거 해제: {preset['desc']}")
+        return
+    try:
+        res = ft.apply_correlation_preset(preset_name)
+    except AdbError as e:
+        print(f"  [경고] 상관 트리거 설치 실패(커널 미지원 가능): {e}")
+        print("        CONFIG_HIST_TRIGGERS / CONFIG_SYNTH_EVENTS 필요. 건너뜁니다.")
+        return
+    print(f"  상관 트리거 설치: {preset['desc']}")
+    if res:
+        print(f"  → 결과는 캡처 로그에 '{res[0]}:{res[1]}' 이벤트로 나타납니다(dev,sector,lat).")
 
 
 def _detail_events(ft, group_state):
