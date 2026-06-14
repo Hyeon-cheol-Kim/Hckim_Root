@@ -64,8 +64,8 @@ python -m android_ftrace_tool --adb /path/to/adb
    - **`y`** — **sync 시스템콜 추적** on/off (아래 "sync 추적" 참고)
    - **`d`** — 켜진 그룹의 **개별 이벤트 세부 선택**(예: `ufs` 에서 클럭/전원 이벤트만
      빼고 `ufshcd_command`·`ufshcd_uic_command` 만 남기기) → 표시는 `[~]`(일부)
-   - **`g`** — **function_graph I/O 인과 보기**(아래 "로그 간 상관" 참고)
-   - **`h`** — **상관 트리거**(block I/O 지연 → `io_latency` 합성 이벤트)
+   - **`g`** — **function_graph I/O 인과 보기**(아래 "로그 간 흐름 추적" 참고)
+   - **`h`** — **흐름 추적 트리거**(block I/O 지연 → `io_latency` 합성 이벤트)
    - **`x`** — 전체 그룹 보기(고급), **`t`** — tracer, **`a`** — 전체 해제, **`s`** — 설정완료
 
    **sync 추적**: `fsync`/`sync` 동작은 계층마다 다른 이벤트로 나타납니다.
@@ -94,12 +94,12 @@ python -m android_ftrace_tool --adb /path/to/adb
 
 ---
 
-## 로그 간 상관(연결) 분석 — read ↔ UFS command 등
+## 로그 간 흐름 추적(연결) 분석 — read ↔ UFS command 등
 
 ftrace 는 기본적으로 "시간순으로 나열된 독립 이벤트"이며, 계층을 관통하는 단일
-상관 ID가 없습니다. 따라서 **묶음으로 켜는 것만으로 "이 read() → 이 ufshcd_command"
+추적 ID가 없습니다. 따라서 **묶음으로 켜는 것만으로 "이 read() → 이 ufshcd_command"
 라는 1:1 인과를 로그만으로 보장할 수는 없습니다**(read 캐시 히트/리드어헤드/병합,
-write 의 비동기 writeback 때문). 대신 아래 **조인 키**로 상관시킵니다.
+write 의 비동기 writeback 때문). 대신 아래 **조인 키**로 흐름을 이어 추적합니다.
 
 | 구간 | 조인 키 |
 |------|---------|
@@ -113,7 +113,7 @@ write 의 비동기 writeback 때문). 대신 아래 **조인 키**로 상관시
   보여줘 `vfs_read → f2fs_…read → submit_bio → scsi → ufshcd_queuecommand` 가 한
   덩어리로 보입니다. 범위는 `core.py` 의 `IO_GRAPH_FUNCTIONS` 로 한정됩니다.
   (로그 형식이 이벤트 방식과 달라 analyzer 대상은 아님)
-- **(B) `h` — hist/synthetic 상관 트리거**: `block_rq_issue`↔`complete` 를
+- **(B) `h` — hist/synthetic 흐름 추적 트리거**: `block_rq_issue`↔`complete` 를
   `(dev,sector)` 로 **커널에서 조인**해 지연을 `io_latency` 합성 이벤트로 로그에
   남깁니다. `CONFIG_HIST_TRIGGERS`/`CONFIG_SYNTH_EVENTS` 필요(best-effort).
 - **(C) 사후 분석 스크립트(analyzer)**: 저장된 `.log` 를 파싱해 위 조인 키로
@@ -127,12 +127,12 @@ write 의 비동기 writeback 때문). 대신 아래 **조인 키**로 상관시
 - **(D) 조인 키/한계**: 위 표와 이 문단이 그 문서입니다. "파일(추정)" 은
   best-effort 매칭이며 1:1 인과를 보장하지 않습니다.
 
-**권장 사용**: 지연·상관 수치는 `h`(B) + analyzer(C) 조합, 동기 read 경로의 인과를
+**권장 사용**: 지연·흐름 추적 수치는 `h`(B) + analyzer(C) 조합, 동기 read 경로의 인과를
 눈으로 따라가려면 `g`(A) 를 쓰세요.
 
 ### 정밀(1:1) 대안 — bpftrace 스크립트 생성기
 
-ftrace 로그 후처리(analyzer)는 best-effort 매칭입니다. **진짜 1:1 상관과 정확한
+ftrace 로그 후처리(analyzer)는 best-effort 매칭입니다. **진짜 1:1 흐름 추적과 정확한
 지연**이 필요하면 bpftrace 가 더 강력합니다 — eBPF 로 **커널 안에서** 조인 키
 (`sector`/`tag`/`tid`)별 맵을 잡아 그 자리에서 지연을 계산하므로 로그 파싱이
 필요 없습니다. 이를 위한 스크립트 생성기를 제공합니다.
@@ -165,8 +165,8 @@ python -m android_ftrace_tool.bpftrace run block_latency \
 |------|------|
 | `core.py` | adb 통신 + ftrace 제어 **순수 로직**. `print`/`input` 없음. GUI 에서 그대로 재사용. |
 | `cli.py`  | 대화형 **콘솔 UI**. 모든 출력/입력이 여기 격리됨. |
-| `analyzer.py` | 저장된 `.log` **사후 상관 분석**(UFS↔block↔파일 스티칭, 지연 리포트). 독립 실행. |
-| `bpftrace.py` | **커널-내 1:1 상관** bpftrace 스크립트 생성/실행기. 독립 실행. |
+| `analyzer.py` | 저장된 `.log` **사후 흐름 추적 분석**(UFS↔block↔파일 스티칭, 지연 리포트). 독립 실행. |
+| `bpftrace.py` | **커널-내 1:1 흐름 추적** bpftrace 스크립트 생성/실행기. 독립 실행. |
 | `__main__.py` | `python -m android_ftrace_tool` 진입점. |
 
 ### GUI 확장 시

@@ -285,7 +285,7 @@ IO_GRAPH_FUNCTIONS = [
     "scsi_queue_rq", "ufshcd_queuecommand",
 ]
 
-# ── (B) hist/synthetic 상관 트리거 프리셋 ───────────────────────────
+# ── (B) hist/synthetic 흐름 추적 트리거 프리셋 ───────────────────────────
 # 두 이벤트를 공유 키(dev,sector)로 커널에서 조인해 지연(latency)을 산출하고,
 # 그 결과를 합성(synthetic) 이벤트로 만들어 같은 로그에 남긴다.
 # 커널에 CONFIG_HIST_TRIGGERS / CONFIG_SYNTH_EVENTS 가 필요하다(best-effort,
@@ -293,14 +293,19 @@ IO_GRAPH_FUNCTIONS = [
 CORRELATION_TRIGGERS = {
     "block_io_latency": {
         "desc": "block_rq_issue↔complete 를 (dev,sector)로 조인해 io_latency 합성 이벤트 생성",
+        # 합성 이벤트 정의: 이름 io_latency, 필드 lat/dev/sector (모두 u64).
         "synthetic": "io_latency u64 lat; u64 dev; u64 sector",
         "triggers": [
+            # 발행: (dev,sector) 별로 발행 시각을 변수 ts0 에 저장(common_timestamp).
             ("block", "block_rq_issue",
              "hist:keys=dev,sector:ts0=common_timestamp.usecs"),
+            # 완료: 같은 (dev,sector) 의 ts0 와의 차이를 lat 로 구하고,
+            #       onmatch 로 발행 이벤트와 매칭되는 순간 io_latency 를 쏜다.
             ("block", "block_rq_complete",
              "hist:keys=dev,sector:lat=common_timestamp.usecs-$ts0:"
              "onmatch(block.block_rq_issue).io_latency($lat,dev,sector)"),
         ],
+        # 위 트리거가 만들어내는 결과 이벤트(캡처 로그에 이 줄로 나타남).
         "result_event": ("synthetic", "io_latency"),
     },
 }
@@ -433,7 +438,7 @@ class Ftrace:
         """set_graph_function 을 비워 function_graph 범위 제한을 해제한다."""
         self.adb.shell(f"echo > {self._path('set_graph_function')}", check=False)
 
-    # ── (B) hist/synthetic 상관 트리거 ────────────────────────────
+    # ── (B) hist/synthetic 흐름 추적 트리거 ────────────────────────────
     def create_synthetic_event(self, definition):
         """synthetic_events 에 합성 이벤트를 정의한다(예: 'io_latency u64 lat; ...')."""
         self.adb.shell(f"echo '{definition}' >> {self._path('synthetic_events')}",
@@ -465,28 +470,35 @@ class Ftrace:
         """
         preset = CORRELATION_TRIGGERS[name]
         try:
+            # 1) 합성 이벤트 먼저 정의해야 트리거의 onmatch(...).<synth>() 가 유효하다.
+            #    정의 문자열의 첫 토큰이 이벤트 이름이라 정리용으로 따로 보관한다.
             if preset.get("synthetic"):
                 self.create_synthetic_event(preset["synthetic"])
                 self._installed_synth.append(preset["synthetic"].split()[0])
+            # 2) 트리거들을 차례로 설치(설치 성공분만 추적 리스트에 누적).
             for g, e, trig in preset["triggers"]:
                 self.set_event_trigger(g, e, trig)
                 self._installed_triggers.append((g, e, trig))
         except AdbError:
+            # 중간에 실패하면(커널 미지원 등) 지금까지 설치한 것만 깔끔히 되돌린다.
             self.remove_correlation_presets()   # 부분 설치 롤백
             raise
+        # 3) 결과(합성) 이벤트를 enable 해야 캡처 로그에 그 줄이 찍힌다.
         res = preset.get("result_event")
         if res:
             try:
                 self.enable_event(res[0], res[1], True)  # 결과 이벤트를 캡처에 포함
             except AdbError:
-                pass
+                pass                                     # enable 실패는 치명적이지 않음
         return res
 
     def remove_correlation_presets(self):
-        """설치한 모든 상관 트리거와 합성 이벤트를 제거한다."""
+        """설치한 모든 흐름 추적 트리거와 합성 이벤트를 제거한다."""
+        # 설치 역순으로 트리거를 떼야 의존(예: complete→issue 참조)이 안 깨진다.
         for g, e, trig in reversed(self._installed_triggers):
             self.clear_event_trigger(g, e, trig)
         self._installed_triggers = []
+        # 트리거를 모두 뗀 뒤에야 합성 이벤트를 안전하게 삭제할 수 있다.
         for name in self._installed_synth:
             self.remove_synthetic_event(name)
         self._installed_synth = []
@@ -581,7 +593,7 @@ class Ftrace:
     # ── 정리(원복) ────────────────────────────────────────────────
     def disable_all_events(self):
         """모든 이벤트/트리거/그래프설정을 끄고 tracer 를 nop 으로 되돌린다(정리용)."""
-        # 상관 트리거·합성 이벤트 먼저 제거(이벤트보다 먼저 떼야 안전)
+        # 흐름 추적 트리거·합성 이벤트 먼저 제거(이벤트보다 먼저 떼야 안전)
         self.remove_correlation_presets()
         self.adb.shell(f"echo 0 > {self._path('events/enable')}", check=False)
         self.adb.shell(f"echo nop > {self._path('current_tracer')}", check=False)

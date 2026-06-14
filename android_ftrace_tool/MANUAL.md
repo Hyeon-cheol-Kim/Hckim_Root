@@ -1,7 +1,7 @@
 # Android ftrace I/O 분석 도구 — 전체 매뉴얼
 
 앱의 파일 I/O 가 **앱 → 파일시스템(F2FS/EXT4) → block → SCSI → UFS** 까지 내려가는
-스토리지 데이터 플로우를, ftrace 로 캡처하고 계층 간 **상관(연결)** 까지 분석하는
+스토리지 데이터 플로우를, ftrace 로 캡처하고 계층 간 **흐름 추적(연결)** 까지 분석하는
 도구입니다. 이 문서는 **모든 기능과 사용법을 예시와 함께** 설명합니다.
 
 - 빠른 요약만 원하면 → `README.md`
@@ -16,12 +16,12 @@
 3. [기능 1 — 로그 캡처 (`python -m android_ftrace_tool`)](#3-기능-1--로그-캡처)
 4. [캡처 메뉴 명령 전체 레퍼런스](#4-캡처-메뉴-명령-전체-레퍼런스)
 5. [기능 2 — function_graph I/O 인과 보기 (`g`)](#5-기능-2--function_graph-io-인과-보기-g)
-6. [기능 3 — 상관 트리거 / io_latency 합성 이벤트 (`h`)](#6-기능-3--상관-트리거--io_latency-합성-이벤트-h)
-7. [기능 4 — 사후 상관 분석기 (`analyzer`)](#7-기능-4--사후-상관-분석기-analyzer)
-8. [기능 5 — bpftrace 커널-내 1:1 상관 (`bpftrace`)](#8-기능-5--bpftrace-커널-내-11-상관-bpftrace)
+6. [기능 3 — 흐름 추적 트리거 / io_latency 합성 이벤트 (`h`)](#6-기능-3--흐름-추적-트리거--io_latency-합성-이벤트-h)
+7. [기능 4 — 사후 흐름 추적 분석기 (`analyzer`)](#7-기능-4--사후-흐름-추적-분석기-analyzer)
+8. [기능 5 — bpftrace 커널-내 1:1 흐름 추적 (`bpftrace`)](#8-기능-5--bpftrace-커널-내-11-흐름-추적-bpftrace)
 9. [기능 6 — 커널 eBPF 준비도 점검 (`bpftrace check`)](#9-기능-6--커널-ebpf-준비도-점검-bpftrace-check)
 10. [기능 7 — bpftrace 바이너리 빌드 (`tools/bpftrace-android`)](#10-기능-7--bpftrace-바이너리-빌드)
-11. [상관(조인) 키와 한계](#11-상관조인-키와-한계)
+11. [흐름 추적 키와 한계](#11-흐름-추적-키와-한계)
 12. [엔드투엔드 시나리오 예시](#12-엔드투엔드-시나리오-예시)
 13. [문제 해결(Troubleshooting)](#13-문제-해결)
 
@@ -33,8 +33,8 @@
 |------|------|------|
 | `core.py` | adb 통신 + ftrace 제어 **순수 로직**(print/input 없음) | (라이브러리) |
 | `cli.py` | 대화형 콘솔 UI | `python -m android_ftrace_tool` |
-| `analyzer.py` | 저장된 `.log` 사후 상관 분석 | `python -m android_ftrace_tool.analyzer` |
-| `bpftrace.py` | eBPF 상관 스크립트 생성·실행·준비도 점검 | `python -m android_ftrace_tool.bpftrace` |
+| `analyzer.py` | 저장된 `.log` 사후 흐름 추적 분석 | `python -m android_ftrace_tool.analyzer` |
+| `bpftrace.py` | eBPF 흐름 추적 스크립트 생성·실행·준비도 점검 | `python -m android_ftrace_tool.bpftrace` |
 | `tools/bpftrace-android/` | aarch64 정적 bpftrace 빌드 | `./build.sh` |
 
 **분석 스택(목적별로 골라 쓰기):**
@@ -44,7 +44,7 @@
 | 무슨 I/O 가 일어나는지 전체 흐름 보기 | 캡처(`f`) → `.log` | 보통 / 낮음 |
 | 동기 read 경로 인과를 눈으로 추적 | 캡처 `g`(function_graph) | 보통 / 중간 |
 | UFS·block 지연 + 파일 연결을 표로 | 캡처 `f`(+`h`) → `analyzer` | best-effort / 낮음 |
-| 정확한 지연·진짜 1:1 상관 | `bpftrace run` | 높음 / 높음(빌드 필요) |
+| 정확한 지연·진짜 1:1 흐름 추적 | `bpftrace run` | 높음 / 높음(빌드 필요) |
 
 ---
 
@@ -87,7 +87,7 @@ python -m android_ftrace_tool --adb /path/to/adb
 4. 폰에서 측정할 동작 수행(앱 실행, 파일 저장 등)
 5. **Ctrl-C** → 캡처 종료 → `.log` 저장(+옵션에 따라 폰에서 pull)
 
-**가장 흔한 사용(상관 분석 목적):**
+**가장 흔한 사용(흐름 추적 분석 목적):**
 ```
 1) 디바이스 선택
 2) f  ← read/write/erase 플로우 전체 켜기(android_fs→f2fs→writeback→block→scsi→ufs)
@@ -112,7 +112,7 @@ python -m android_ftrace_tool --adb /path/to/adb
 | **`y`** | **sync 시스템콜** 추적 on/off | `fsync`/`fdatasync`/`sync` 등 syscall tracepoint |
 | **`d`** | 켜진 그룹의 **개별 이벤트 세부 선택**(빼기) | 예: `ufs` 에서 클럭/전원 이벤트 빼고 `ufshcd_command` 만 남김 → `[~]` |
 | **`g`** | **function_graph I/O 인과 보기** on/off | 5장 참고 |
-| **`h`** | **상관 트리거**(block I/O 지연 → `io_latency`) on/off | 6장 참고 |
+| **`h`** | **흐름 추적 트리거**(block I/O 지연 → `io_latency`) on/off | 6장 참고 |
 | **`t`** | tracer 설정 | `nop`(기본, 이벤트 캡처) / `function_graph` 등 |
 | **`x`** | 스토리지만 보기 ↔ 전체 그룹 보기(고급) | 지원 그룹 전체 탐색 |
 | **`a`** | 전체 선택 해제(트리거·그래프 설정도 정리) | 초기화 |
@@ -164,7 +164,7 @@ python -m android_ftrace_tool --adb /path/to/adb
 
 ---
 
-## 6. 기능 3 — 상관 트리거 / io_latency 합성 이벤트 (`h`)
+## 6. 기능 3 — 흐름 추적 트리거 / io_latency 합성 이벤트 (`h`)
 
 ftrace 의 **hist/synthetic** 기능으로, `block_rq_issue` 와 `block_rq_complete` 를
 공유 키 `(dev, sector)` 로 **커널 안에서 조인**해 지연을 계산하고, 그 결과를
@@ -186,10 +186,10 @@ adb shell su -c 'cat /sys/kernel/tracing/events/synthetic/io_latency/hist'
 
 ---
 
-## 7. 기능 4 — 사후 상관 분석기 (`analyzer`)
+## 7. 기능 4 — 사후 흐름 추적 분석기 (`analyzer`)
 
 저장된 `.log` 를 파싱해 **UFS ↔ block ↔ 파일** 을 자동으로 스티칭하고, opcode 별
-지연 요약과 상관 체인을 출력합니다.
+지연 요약과 흐름 추적 체인을 출력합니다.
 
 ```bash
 python -m android_ftrace_tool.analyzer capture.log                  # 화면 출력
@@ -203,12 +203,12 @@ python -m android_ftrace_tool.analyzer capture.log --limit 100      # 체인 100
 |------|------|------|
 | `logfile` | 분석할 캡처 `.log` (필수) | — |
 | `-o, --output` | 리포트 저장 경로 | 화면 출력 |
-| `--limit N` | 상관 체인 출력 개수 | 50 |
+| `--limit N` | 흐름 추적 체인 출력 개수 | 50 |
 
 **출력 예시(실제 형식):**
 ```
 ======================================================================
- Android ftrace 상관 분석 리포트
+ Android ftrace 흐름 추적 분석 리포트
 ======================================================================
  파싱 라인: 15  (인식 이벤트: 15)
  이벤트 수 — ufs:4 block_issue:2 scsi:2 f2fs_map:2 android_fs:2 io_latency:0
@@ -219,7 +219,7 @@ python -m android_ftrace_tool.analyzer capture.log --limit 100      # 체인 100
    READ               1     340.0     340.0
    WRITE              1     234.0     234.0
 
- ── 상관 체인 (UFS↔block↔파일, 상위 2건) ──
+ ── 흐름 추적 체인 (UFS↔block↔파일, 상위 2건) ──
    (block 매칭 2/2, 파일 추정 1/2)
    [UFS WRITE_10    LBA=294912 tag=9 dev_lat=234.0us]
         ↔ block sector=2359296 rwbs=WS nr=8 blk_lat=320.0us comm=Binder:512_3
@@ -240,9 +240,9 @@ python -m android_ftrace_tool.analyzer capture.log --limit 100      # 체인 100
 
 ---
 
-## 8. 기능 5 — bpftrace 커널-내 1:1 상관 (`bpftrace`)
+## 8. 기능 5 — bpftrace 커널-내 1:1 흐름 추적 (`bpftrace`)
 
-로그 후처리(analyzer)는 best-effort 입니다. **정확한 지연·진짜 1:1 상관**이
+로그 후처리(analyzer)는 best-effort 입니다. **정확한 지연·진짜 1:1 흐름 추적**이
 필요하면 bpftrace 가 eBPF 로 **커널 안에서** 조인 키별 맵을 잡아 그 자리에서 지연을
 계산합니다(로그 파싱 불필요).
 
@@ -367,7 +367,7 @@ python -m android_ftrace_tool.bpftrace check \
 
 ---
 
-## 11. 상관(조인) 키와 한계
+## 11. 흐름 추적 키와 한계
 
 ftrace 에는 계층을 관통하는 단일 ID 가 없습니다. 다음 **조인 키**로 연결합니다.
 
@@ -396,7 +396,7 @@ python -m android_ftrace_tool
 #   → 디바이스 선택 → f → h → s → 캡처 시작
 # 2) 폰에서 카메라로 사진 저장
 # 3) Ctrl-C 로 종료 → photo_save.log 저장
-# 4) 상관 분석
+# 4) 흐름 추적 분석
 python -m android_ftrace_tool.analyzer photo_save.log -o photo_report.txt
 #   → WRITE_10 ↔ block(sector,comm=kworker) ↔ 파일(추정) 체인 확인
 ```

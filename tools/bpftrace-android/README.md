@@ -1,6 +1,6 @@
 # Android(aarch64)용 bpftrace 정적 바이너리 빌드
 
-`python -m android_ftrace_tool.bpftrace run ...` 으로 eBPF 상관 스크립트를 폰에서
+`python -m android_ftrace_tool.bpftrace run ...` 으로 eBPF 흐름 추적 스크립트를 폰에서
 돌리려면, **폰에 맞는 bpftrace 바이너리**가 필요합니다. 여기 도구는 그중 가장
 재현성 좋은 **방법 C(정적 크로스컴파일)** 를 자동화합니다.
 
@@ -49,7 +49,7 @@ adb shell su -c 'chmod 755 /data/local/tmp/bpftrace'
 python -m android_ftrace_tool.bpftrace check \
        --bpftrace /data/local/tmp/bpftrace --su
 
-# 실제 상관 스크립트 실행(예: 블록 I/O 지연 10초)
+# 실제 흐름 추적 스크립트 실행(예: 블록 I/O 지연 10초)
 python -m android_ftrace_tool.bpftrace run block_latency \
        --bpftrace /data/local/tmp/bpftrace --duration 10 --su
 ```
@@ -68,4 +68,4 @@ bpftrace/Alpine 버전에 따라 패키지명·CMake 옵션이 달라질 수 있
   `/sys/kernel/btf/vmlinux` 가 있어야 kprobe 스크립트가 잘 됩니다(`check` 로 확인).
 
 이 방법이 번거로우면, bpftrace 없이 동작하는 **ftrace 기반 기능**(`g`/`h` +
-`analyzer.py`)으로도 상관·지연 분석이 가능합니다(메인 매뉴얼 참고).
+`analyzer.py`)으로도 흐름 추적·지연 분석이 가능합니다(메인 매뉴얼 참고).

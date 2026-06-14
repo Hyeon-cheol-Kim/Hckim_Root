@@ -97,7 +97,13 @@ def parse_log(path):
 
 
 def _dispatch(p, ev, rest, ts, m):
+    """
+    이벤트 종류(ev)에 따라 rest(이벤트 뒷부분 필드 문자열)를 파싱해 Parsed 의
+    해당 리스트에 적재한다. 필드명/형식은 커널 버전마다 조금씩 달라, 각 정규식은
+    있으면 뽑고 없으면 None 으로 둔다(부분 정보라도 최대한 보존).
+    """
     if ev == "ufshcd_command":
+        # UFS 한 줄에서 송/완(str), opcode(0x..+이름), tag, LBA, size 를 뽑는다.
         sm = _UFS_STR_RE.match(rest)
         op = _UFS_OP_RE.search(rest)
         tag = _UFS_TAG_RE.search(rest)
@@ -114,17 +120,21 @@ def _dispatch(p, ev, rest, ts, m):
         })
         p.matched += 1
     elif ev in ("block_rq_issue", "block_rq_complete", "block_bio_queue"):
+        # "maj,min RWBS [bytes] [()] sector + nr [comm]" 에서 dev/sector/nr/rwbs 추출.
         bm = _BLOCK_RE.search(rest)
         if not bm:
             return
+        # 제출 프로세스명은 줄 끝 대괄호 [comm] 안에 있다(완료줄은 [0]일 수 있음).
         comm = rest.rsplit("[", 1)[-1].rstrip("]\n ") if "[" in rest else ""
         rec = {"ts": ts, "dev": f"{bm.group('maj')},{bm.group('min')}",
                "sector": int(bm.group("sector")), "nr": int(bm.group("nr")),
                "rwbs": bm.group("rwbs"), "comm": comm}
+        # 발행/완료를 따로 모아 두면 _block_latencies 에서 (dev,sector)로 짝짓는다.
         if ev == "block_rq_complete":
             p.block_complete.append(rec)
         elif ev == "block_rq_issue":
             p.block_issue.append(rec)
+        # block_bio_queue 는 큐잉 시점 참고용이라 별도 저장하지 않는다.
         p.matched += 1
     elif ev in ("scsi_dispatch_cmd_start", "scsi_dispatch_cmd_done"):
         name = _SCSI_NAME_RE.search(rest)
@@ -133,6 +143,8 @@ def _dispatch(p, ev, rest, ts, m):
                        "lba": int(lba.group(1)) if lba else None})
         p.matched += 1
     elif ev == "f2fs_map_blocks":
+        # 파일↔디바이스를 잇는 핵심: inode 와 그 파일의 물리블록(m_pblk).
+        # (논리블록 m_lblk = 파일 오프셋/4K, m_len = 매핑 길이)
         ino = _INO_RE.search(rest)
         pblk = _PBLK_RE.search(rest)
         lblk = _LBLK_RE.search(rest)
@@ -144,6 +156,7 @@ def _dispatch(p, ev, rest, ts, m):
                            "mlen": int(mlen.group(1)) if mlen else None})
         p.matched += 1
     elif ev.startswith("android_fs_dataread") or ev.startswith("android_fs_datawrite"):
+        # 앱↔파일 매핑: inode 로 실제 경로(path)/오프셋/바이트/프로세스를 알 수 있다.
         ino = _AFS_INO_RE.search(rest)
         path = _AFS_PATH_RE.search(rest)
         bytes_ = _AFS_BYTES_RE.search(rest)
@@ -156,7 +169,7 @@ def _dispatch(p, ev, rest, ts, m):
                              "op": "read" if "read" in ev else "write",
                              "pid": m.group("pid"), "task": m.group("task")})
         p.matched += 1
-    elif ev == "io_latency":   # 합성 이벤트(상관 트리거 결과)
+    elif ev == "io_latency":   # 합성 이벤트(흐름 추적 트리거 결과)
         lat = _SYN_LAT_RE.search(rest)
         sec = _SYN_SECTOR_RE.search(rest)
         if lat and sec:
@@ -165,14 +178,23 @@ def _dispatch(p, ev, rest, ts, m):
             p.matched += 1
 
 
-# ── 상관(연결) 계산 ────────────────────────────────────────────────
+# ── 흐름 추적(연결) 계산 ──────────────────────────────────────────
 def _detect_ratio(p):
-    """device sector = LBA × ratio 의 ratio 를 후보 중 매칭이 가장 많은 값으로 추정."""
+    """
+    device sector = LBA × ratio 의 ratio 를 데이터에서 추정한다.
+
+    block 계층의 sector 는 512B 단위, UFS LBA 는 디바이스 논리블록(보통 4K) 단위라
+    둘 사이에는 ratio = 논리블록/512 (4K이면 8) 라는 고정 배수가 있다. 그러나 단말
+    마다 논리블록 크기가 다를 수 있으므로, 후보 배수들 중 "LBA×r 가 실제 sector
+    집합에 들어맞는 횟수(hits)"가 가장 큰 값을 정답으로 고른다.
+    """
+    # block 발행 sector 들을 set 으로 모아 빠른 멤버십 검사(LBA×r ∈ sectors)에 쓴다.
     sectors = {b["sector"] for b in p.block_issue}
     lbas = [u["lba"] for u in p.ufs if u["lba"] is not None]
     if not sectors or not lbas:
-        return 8           # 일반적 4K 논리블록 기본값
+        return 8           # 한쪽이라도 비면 추정 불가 → 가장 흔한 4K(=×8) 기본값
     best_r, best_hits = 8, -1
+    # 흔한 배수 후보들(4K=8, 8K=16, 2K=4, 1K=2, 512=1). 매칭 수가 최대인 것을 채택.
     for r in (8, 16, 4, 2, 1):
         hits = sum(1 for lba in lbas if lba * r in sectors)
         if hits > best_hits:
@@ -181,38 +203,59 @@ def _detect_ratio(p):
 
 
 def _ufs_latencies(p):
-    """ufshcd_command send→complete 를 tag(FIFO)로 묶어 device 지연(us) 산출."""
-    pending = defaultdict(list)   # tag -> [send 레코드,...]
+    """
+    ufshcd_command 의 send→complete 를 tag 로 짝지어 device 처리 지연(us)을 구한다.
+
+    같은 tag 는 동시에 하나만 떠 있는 게 보통이지만, 재사용될 수 있으므로 tag 별로
+    큐(FIFO)를 두고 send 를 쌓았다가 complete 가 오면 가장 오래된 send 와 매칭한다.
+    이벤트는 시간순으로 처리해야 짝이 어긋나지 않으므로 ts 로 정렬한다.
+    """
+    pending = defaultdict(list)   # tag -> [아직 complete 안 된 send 레코드들]
     out = []
     for u in sorted(p.ufs, key=lambda x: x["ts"]):
         if u["str"] == "send":
+            # 발행: 나중에 complete 와 짝지을 수 있도록 보관.
             pending[u["tag"]].append(u)
         elif u["str"] in ("complete", "dev_complete"):
+            # 완료: 같은 tag 의 가장 먼저 발행된 send 를 꺼내 지연을 계산.
             q = pending.get(u["tag"])
             if q:
                 s = q.pop(0)
-                out.append({**u, "lat_us": (u["ts"] - s["ts"]) * 1e6,
+                out.append({**u,
+                            # 초 단위 ts 차이를 us 로 환산(×1e6).
+                            "lat_us": (u["ts"] - s["ts"]) * 1e6,
+                            # complete 줄에 LBA/opcode 가 비면 send 값으로 보완.
                             "lba": u["lba"] if u["lba"] is not None else s["lba"],
                             "opname": u["opname"] or s["opname"]})
     return out
 
 
 def _block_latencies(p):
-    """block_rq_issue→complete 를 (dev,sector)로 묶어 블록 지연(us) 산출."""
-    # io_latency 합성 이벤트가 있으면 그것을 우선 사용(커널 조인 결과).
+    """
+    block_rq_issue→complete 를 (dev,sector)로 짝지어 블록계층 왕복 지연(us)을 구하고,
+    sector → {지연, 제출 comm, rwbs, nr} 매핑을 돌려준다.
+
+    제출 프로세스(comm)는 issue 시점에만 정확하므로(완료는 보통 IRQ/idle 컨텍스트)
+    issue 쪽 comm 을 보존한다. (B) 흐름 추적 트리거의 io_latency 합성 이벤트가 캡처에
+    있으면, 커널이 직접 계산한 그 값을 우선 사용한다.
+    """
+    # io_latency(합성 이벤트)가 있으면 sector→lat 로 우선 참조 테이블 구성.
     syn = {s["sector"]: s["lat"] for s in p.io_latency}
-    pending = defaultdict(list)
+    pending = defaultdict(list)   # (dev,sector) -> [아직 complete 안 된 issue 들]
     out = {}
+    # issue 를 시간순으로 (dev,sector) 큐에 쌓는다.
     for b in sorted(p.block_issue, key=lambda x: x["ts"]):
         pending[(b["dev"], b["sector"])].append(b)
+    # complete 마다 같은 키의 가장 오래된 issue 와 매칭해 지연을 산출.
     for c in sorted(p.block_complete, key=lambda x: x["ts"]):
         q = pending.get((c["dev"], c["sector"]))
         if q:
             s = q.pop(0)
+            # 합성 이벤트 값이 있으면 그걸, 없으면 ts 차이로 직접 계산.
             lat = syn.get(c["sector"], (c["ts"] - s["ts"]) * 1e6)
             out[c["sector"]] = {"lat_us": lat, "comm": s["comm"],
                                 "rwbs": s["rwbs"], "nr": s["nr"]}
-    # 완료가 없어도 issue 정보는 보존
+    # 완료 이벤트가 캡처에 안 잡힌 issue 도 정보(comm 등)는 남긴다(지연은 None).
     for b in p.block_issue:
         out.setdefault(b["sector"], {"lat_us": None, "comm": b["comm"],
                                      "rwbs": b["rwbs"], "nr": b["nr"]})
@@ -221,29 +264,39 @@ def _block_latencies(p):
 
 def _infer_partition_offset(p, ratio, window=0.05):
     """
-    block.sector 와 f2fs_map.m_pblk 의 관계: sector = part_offset + pblk×ratio.
-    시간상 가까운 (f2fs_map, block_issue) 쌍에서 offset 후보를 모아 최빈값을 택한다.
+    파일↔디바이스를 잇기 위한 파티션 오프셋(섹터)을 데이터에서 추정한다.
+
+    f2fs_map_blocks 의 m_pblk 는 '파티션 내부' 물리블록이고, block 계층 sector 는
+    '디스크 절대' 섹터라, 둘 사이엔 sector = part_offset + pblk×ratio 의 고정
+    오프셋이 있다(파티션 시작 위치). 이 오프셋을 모르면 파일을 디바이스 명령에 연결할
+    수 없다. 그래서 시간상 가까운(window 초 이내) (f2fs_map, block_issue) 쌍마다
+    오프셋 후보(sector − pblk×ratio)를 모으고, 가장 자주 나온 값(최빈값)을 택한다.
+    오프셋은 상수이므로 진짜 값이 가장 많이 반복되어 노이즈를 이긴다.
     """
     if not p.f2fs_map or not p.block_issue:
-        return None
-    cands = Counter()
+        return None            # 한쪽이라도 없으면 다리(bridge)를 놓을 수 없음
+    cands = Counter()          # 오프셋 후보 → 등장 횟수
     blocks = sorted(p.block_issue, key=lambda x: x["ts"])
     for fm in p.f2fs_map:
         if fm["pblk"] is None:
             continue
         for b in blocks:
+            # 시간이 멀면 같은 I/O 일 가능성이 낮으므로 후보에서 제외.
             if abs(b["ts"] - fm["ts"]) > window:
                 continue
             off = b["sector"] - fm["pblk"] * ratio
-            if off >= 0:
+            if off >= 0:       # 음수 오프셋은 물리적으로 불가 → 무시
                 cands[off] += 1
     if not cands:
         return None
-    return cands.most_common(1)[0][0]
+    return cands.most_common(1)[0][0]   # 최빈 오프셋을 파티션 시작으로 채택
 
 
 def _ino_to_file(p):
-    """ino → (path, op) 매핑(android_fs 기준, 가장 최근 것)."""
+    """
+    ino → (경로, op) 매핑을 만든다(android_fs 이벤트 기준).
+    같은 ino 가 여러 번 나오면 뒤에 나온 것으로 덮어써 '가장 최근' 경로를 남긴다.
+    """
     table = {}
     for a in p.android_fs:
         if a["ino"] is not None:
@@ -252,23 +305,34 @@ def _ino_to_file(p):
 
 
 def correlate(p):
-    """파싱 결과로부터 UFS 명령 중심의 상관 체인을 만든다."""
-    ratio = _detect_ratio(p)
-    ufs_lat = _ufs_latencies(p)
-    blk = _block_latencies(p)
-    part_off = _infer_partition_offset(p, ratio)
-    ino_file = _ino_to_file(p)
-    # pblk → ino (f2fs_map)
+    """
+    파싱 결과(Parsed)로부터 'UFS 명령 1건 = 한 줄'인 흐름 추적 체인 목록을 만든다.
+
+    각 체인은 UFS 명령을 기준으로:
+      UFS(LBA) ──[sector=LBA×ratio]── block(sector) ──[+part_off, /ratio]──
+      f2fs pblk ──[m_pblk→ino]── ino ──[android_fs]── 파일 경로
+    순으로 키를 따라가며 연결한다. 연결이 안 되는 구간은 None 으로 남긴다.
+    """
+    # 1) 계층 간 배수와 각 계층의 지연을 먼저 구한다.
+    ratio = _detect_ratio(p)              # sector ↔ LBA 배수
+    ufs_lat = _ufs_latencies(p)           # UFS device 지연(체인의 기준 축)
+    blk = _block_latencies(p)             # sector → 블록 지연/comm
+    part_off = _infer_partition_offset(p, ratio)   # 파일↔디바이스 다리(오프셋)
+    ino_file = _ino_to_file(p)            # ino → (경로, op)
+    # f2fs_map 으로 만든 물리블록→inode 역인덱스(파일 귀속에 사용).
     pblk_ino = {fm["pblk"]: fm["ino"] for fm in p.f2fs_map if fm["pblk"] is not None}
 
     chains = []
-    for u in ufs_lat:
+    for u in ufs_lat:                     # UFS 명령(완료된 것)마다 한 체인
         lba = u["lba"]
         chain = {"ufs": u, "block": None, "file": None}
         if lba is not None:
+            # 2) UFS → block: LBA 를 sector 로 환산해 같은 sector 의 블록 요청을 찾음.
             sector = lba * ratio
             chain["block"] = blk.get(sector)
-            # 파일 추정: sector → f2fs pblk → ino → path
+            # 3) block → 파일(추정): 오프셋을 알면 sector 를 파티션 내 f2fs 블록으로
+            #    되돌리고(pblk), 그 pblk 가 어느 inode 인지, 그 inode 의 경로가
+            #    무엇인지 차례로 조회한다.
             if part_off is not None:
                 pblk = (sector - part_off) // ratio
                 ino = pblk_ino.get(pblk)
@@ -276,6 +340,7 @@ def correlate(p):
                     path, op = ino_file[ino]
                     chain["file"] = {"ino": ino, "path": path, "op": op}
         chains.append(chain)
+    # ratio/part_off 는 리포트 헤더에서 추정값을 보여주기 위해 함께 반환.
     return {"ratio": ratio, "part_off": part_off, "chains": chains,
             "ufs_lat": ufs_lat, "blk": blk}
 
@@ -300,7 +365,7 @@ def build_report(p, corr, limit=50):
     L = []
     A = L.append
     A("=" * 70)
-    A(" Android ftrace 상관 분석 리포트")
+    A(" Android ftrace 흐름 추적 분석 리포트")
     A("=" * 70)
     A(f" 파싱 라인: {p.total}  (인식 이벤트: {p.matched})")
     A(f" 이벤트 수 — ufs:{len(p.ufs)} block_issue:{len(p.block_issue)} "
@@ -309,7 +374,7 @@ def build_report(p, corr, limit=50):
     A(f" sector=LBA×{corr['ratio']} 로 추정, 파티션 오프셋(sector) 추정: {corr['part_off']}")
     if not corr["ufs_lat"]:
         A("")
-        A(" [안내] ufshcd_command(send/complete) 가 없어 UFS 상관을 만들 수 없습니다.")
+        A(" [안내] ufshcd_command(send/complete) 가 없어 UFS 흐름 추적을 만들 수 없습니다.")
         A("        'ufs' 그룹(또는 f 프리셋)을 켜고 다시 캡처하세요.")
         return "\n".join(L)
 
@@ -326,11 +391,11 @@ def build_report(p, corr, limit=50):
         mx = max(lats2) if lats2 else 0
         A(f"   {cls:<14}{len(lats):>6}{avg:>10.1f}{mx:>10.1f}")
 
-    # 상관 체인 (앞에서 limit 개)
+    # 흐름 추적 체인 (앞에서 limit 개)
     matched_file = sum(1 for c in corr["chains"] if c["file"])
     matched_block = sum(1 for c in corr["chains"] if c["block"])
     A("")
-    A(f" ── 상관 체인 (UFS↔block↔파일, 상위 {min(limit, len(corr['chains']))}건) ──")
+    A(f" ── 흐름 추적 체인 (UFS↔block↔파일, 상위 {min(limit, len(corr['chains']))}건) ──")
     A(f"   (block 매칭 {matched_block}/{len(corr['chains'])}, "
       f"파일 추정 {matched_file}/{len(corr['chains'])})")
     for c in corr["chains"][:limit]:
@@ -354,10 +419,10 @@ def build_report(p, corr, limit=50):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="Android ftrace 로그 상관 분석기")
+        description="Android ftrace 로그 흐름 추적 분석기")
     ap.add_argument("logfile", help="분석할 캡처 .log 파일")
     ap.add_argument("-o", "--output", help="리포트를 저장할 파일(미지정 시 화면 출력)")
-    ap.add_argument("--limit", type=int, default=50, help="상관 체인 출력 개수(기본 50)")
+    ap.add_argument("--limit", type=int, default=50, help="흐름 추적 체인 출력 개수(기본 50)")
     args = ap.parse_args(argv)
 
     try:

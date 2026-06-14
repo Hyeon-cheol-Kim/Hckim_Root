@@ -189,13 +189,13 @@ def configure_options(ft):
 
         sync_on = "syscalls" in group_state      # sync 묶음 활성 여부(근사)
         graph_on = (current_tracer == "function_graph")
-        corr_on = bool(ft._installed_triggers)   # 상관 트리거 설치 여부
+        corr_on = bool(ft._installed_triggers)   # 흐름 추적 트리거 설치 여부
         print("\n  ── 추가 명령 ──")
         print(f"   f) read/write/erase 플로우 전체 켜기(프리셋)")
         print(f"   y) sync 시스템콜 추적(fsync/sync/...)  [현재: {'ON' if sync_on else 'OFF'}]")
         print(f"   d) 켜진 그룹의 개별 이벤트 세부 선택(빼기)")
         print(f"   g) function_graph I/O 인과 보기(호출 중첩)  [현재: {'ON' if graph_on else 'OFF'}]")
-        print(f"   h) 상관 트리거: block I/O 지연(io_latency 합성)  [현재: {'ON' if corr_on else 'OFF'}]")
+        print(f"   h) 흐름 추적 트리거: block I/O 지연(io_latency 합성)  [현재: {'ON' if corr_on else 'OFF'}]")
         print(f"   t) tracer 설정       (현재: {current_tracer})")
         print(f"   a) 전체 선택 해제")
         print(f"   x) {'스토리지만 보기' if show_all else '전체 그룹 보기(고급)'}")
@@ -219,10 +219,10 @@ def configure_options(ft):
                 except AdbError as e:
                     print(f"    [오류] {g} 해제 실패: {e}")
             group_state.clear()
-            # 상관 트리거/합성 이벤트도 함께 정리
+            # 흐름 추적 트리거/합성 이벤트도 함께 정리
             if ft._installed_triggers:
                 ft.remove_correlation_presets()
-            print("  모든 이벤트 그룹/상관 트리거를 해제했습니다.")
+            print("  모든 이벤트 그룹/흐름 추적 트리거를 해제했습니다.")
             continue
 
         if cmd == "f":
@@ -401,19 +401,19 @@ def _toggle_graph_io(ft, current_tracer):
 
 
 def _toggle_correlation(ft, preset_name):
-    """(B) hist/synthetic 상관 트리거 프리셋 on/off (block I/O 지연 → io_latency)."""
+    """(B) hist/synthetic 흐름 추적 트리거 프리셋 on/off (block I/O 지연 → io_latency)."""
     preset = CORRELATION_TRIGGERS[preset_name]
     if ft._installed_triggers:
         ft.remove_correlation_presets()
-        print(f"  상관 트리거 해제: {preset['desc']}")
+        print(f"  흐름 추적 트리거 해제: {preset['desc']}")
         return
     try:
         res = ft.apply_correlation_preset(preset_name)
     except AdbError as e:
-        print(f"  [경고] 상관 트리거 설치 실패(커널 미지원 가능): {e}")
+        print(f"  [경고] 흐름 추적 트리거 설치 실패(커널 미지원 가능): {e}")
         print("        CONFIG_HIST_TRIGGERS / CONFIG_SYNTH_EVENTS 필요. 건너뜁니다.")
         return
-    print(f"  상관 트리거 설치: {preset['desc']}")
+    print(f"  흐름 추적 트리거 설치: {preset['desc']}")
     if res:
         print(f"  → 결과는 캡처 로그에 '{res[0]}:{res[1]}' 이벤트로 나타납니다(dev,sector,lat).")
 

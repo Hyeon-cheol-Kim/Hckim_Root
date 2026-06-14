@@ -1,9 +1,9 @@
 """
-bpftrace 스크립트 생성기 (커널-내 상관, in-kernel correlation)
+bpftrace 스크립트 생성기 (커널-내 흐름 추적, in-kernel correlation)
 ================================================================
 ftrace 로그는 "이벤트 나열 + 사후 매칭"이라 1:1 인과 보장이 어렵다(analyzer.py
 참고). bpftrace 는 eBPF 로 **커널 안에서** 조인 키(sector/tag/tid)별 맵을 잡아
-지연을 그 자리에서 계산하므로, 로그 후처리 없이 진짜 1:1 상관과 정확한 지연을
+지연을 그 자리에서 계산하므로, 로그 후처리 없이 진짜 1:1 흐름 추적과 정확한 지연을
 얻는다. 이 모듈은 스토리지 I/O 경로용 bpftrace 스크립트를 만들어 준다.
 
 전제(디바이스):
@@ -268,7 +268,7 @@ def run_on_device(name, bpftrace_bin, duration=10, adb=None,
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="bpftrace 커널-내 상관 스크립트 생성기")
+        description="bpftrace 커널-내 흐름 추적 스크립트 생성기")
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("list", help="스크립트 목록")
