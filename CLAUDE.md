@@ -19,6 +19,26 @@
 - 영문 식별자(함수/변수명, 예: `correlation`, `apply_correlation_preset`)는
   한글 용어 변경과 무관하게 그대로 둔다.
 
+## 파일 배치 (폴더 규칙)
+
+- **새 파일은 루트에 흩뿌리지 않는다.** 기능/도구 단위로 **전용 폴더**를 만들어
+  그 안에 넣는다(예: `android_ftrace_tool/`, `eye_diagram_converter/`).
+- 한 도구에 속하는 **코드·스펙·문서·다이어그램·빌드 스크립트**는 같은 폴더(또는
+  그 하위 폴더, 예: `tools/`)에 함께 둔다.
+- 폴더명은 도구/기능 이름으로 소문자+`_` 를 쓴다(예: `eye_diagram_converter`).
+- **예외(루트 허용)**: 저장소 전역 문서만 루트에 둔다 — `CLAUDE.md`,
+  `REQUEST_GUIDE.md`. 그 외 코드/자료는 반드시 기능 폴더 안에 둔다.
+- 파일을 옮길 때는 이력 보존을 위해 `git mv` 를 쓰고, 옮긴 경로를 참조하는
+  문서/코드가 있으면 함께 고친다.
+
+### 현재 폴더 구성
+
+| 폴더 | 내용 |
+|------|------|
+| `android_ftrace_tool/` | Android ftrace I/O 캡처·흐름 추적 분석 도구(+ `MANUAL.md`) |
+| `tools/bpftrace-android/` | aarch64 정적 bpftrace 빌드(위 도구의 하위 도구) |
+| `eye_diagram_converter/` | Eye Diagram CSV→이미지 변환기(코드·스펙·블록다이어그램) |
+
 ## 구조 (UI / 로직 분리)
 
 - `core.py` 는 **순수 로직**이다: `print`/`input` 등 UI 코드를 넣지 않는다.
