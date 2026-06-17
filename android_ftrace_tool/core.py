@@ -304,25 +304,52 @@ STACK_TRACE_EVENTS = [
 # ── (B) hist/synthetic 흐름 추적 트리거 프리셋 ───────────────────────────
 # 두 이벤트를 공유 키(dev,sector)로 커널에서 조인해 지연(latency)을 산출하고,
 # 그 결과를 합성(synthetic) 이벤트로 만들어 같은 로그에 남긴다.
-# 커널에 CONFIG_HIST_TRIGGERS / CONFIG_SYNTH_EVENTS 가 필요하다(best-effort,
-# 문법은 커널 버전에 따라 다를 수 있음).
+# 커널에 CONFIG_HIST_TRIGGERS / CONFIG_SYNTH_EVENTS 가 필요하다.
+#
+# 문제: onmatch 액션·합성 필드 문법이 커널 버전마다 다르다. 그래서 한 프리셋에
+# 여러 "변형(variant)"을 두고, 앞에서부터 설치를 시도해 '실제로 먹히는' 변형을
+# 자동 선택한다(설치 후 결과 이벤트 존재까지 확인). 변형 차이:
+#   V1: 액션을 합성이벤트명으로 호출  .io_latency($lat,dev,sector)   (4.17+ 표준)
+#   V2: trace() 액션 형태            .trace(io_latency,$lat,dev,sector) (일부 버전)
+#   V3: 최소 합성(lat만)            필드 타입 불일치를 피해 호환성 최대화
 CORRELATION_TRIGGERS = {
     "block_io_latency": {
         "desc": "block_rq_issue↔complete 를 (dev,sector)로 조인해 io_latency 합성 이벤트 생성",
-        # 합성 이벤트 정의: 이름 io_latency, 필드 lat/dev/sector (모두 u64).
-        "synthetic": "io_latency u64 lat; u64 dev; u64 sector",
-        "triggers": [
-            # 발행: (dev,sector) 별로 발행 시각을 변수 ts0 에 저장(common_timestamp).
-            ("block", "block_rq_issue",
-             "hist:keys=dev,sector:ts0=common_timestamp.usecs"),
-            # 완료: 같은 (dev,sector) 의 ts0 와의 차이를 lat 로 구하고,
-            #       onmatch 로 발행 이벤트와 매칭되는 순간 io_latency 를 쏜다.
-            ("block", "block_rq_complete",
-             "hist:keys=dev,sector:lat=common_timestamp.usecs-$ts0:"
-             "onmatch(block.block_rq_issue).io_latency($lat,dev,sector)"),
+        "variants": [
+            {   # V1 — 표준: onmatch(...).<합성이벤트명>(인자...)
+                "synthetic": "io_latency u64 lat; u64 dev; u64 sector",
+                "triggers": [
+                    ("block", "block_rq_issue",
+                     "hist:keys=dev,sector:ts0=common_timestamp.usecs"),
+                    ("block", "block_rq_complete",
+                     "hist:keys=dev,sector:lat=common_timestamp.usecs-$ts0:"
+                     "onmatch(block.block_rq_issue).io_latency($lat,dev,sector)"),
+                ],
+                "result_event": ("synthetic", "io_latency"),
+            },
+            {   # V2 — trace() 액션 형태
+                "synthetic": "io_latency u64 lat; u64 dev; u64 sector",
+                "triggers": [
+                    ("block", "block_rq_issue",
+                     "hist:keys=dev,sector:ts0=common_timestamp.usecs"),
+                    ("block", "block_rq_complete",
+                     "hist:keys=dev,sector:lat=common_timestamp.usecs-$ts0:"
+                     "onmatch(block.block_rq_issue).trace(io_latency,$lat,dev,sector)"),
+                ],
+                "result_event": ("synthetic", "io_latency"),
+            },
+            {   # V3 — 최소 합성(lat만): 필드 타입 불일치 회피로 호환성 최대
+                "synthetic": "io_latency u64 lat",
+                "triggers": [
+                    ("block", "block_rq_issue",
+                     "hist:keys=dev,sector:ts0=common_timestamp.usecs"),
+                    ("block", "block_rq_complete",
+                     "hist:keys=dev,sector:lat=common_timestamp.usecs-$ts0:"
+                     "onmatch(block.block_rq_issue).io_latency($lat)"),
+                ],
+                "result_event": ("synthetic", "io_latency"),
+            },
         ],
-        # 위 트리거가 만들어내는 결과 이벤트(캡처 로그에 이 줄로 나타남).
-        "result_event": ("synthetic", "io_latency"),
     },
 }
 
@@ -351,6 +378,7 @@ class Ftrace:
         self._installed_triggers = []  # (group, event, trigger) — 정리용 추적
         self._installed_synth = []     # 생성한 synthetic 이벤트 이름 — 정리용
         self._installed_stack_triggers = []  # stacktrace 붙인 (group, event) — 정리용
+        self._active_correlation_variant = None  # 마지막으로 먹힌 흐름추적 변형 번호
 
     # ── tracefs 경로 탐지 ─────────────────────────────────────────
     def detect_tracefs(self):
@@ -481,33 +509,54 @@ class Ftrace:
     def apply_correlation_preset(self, name):
         """
         CORRELATION_TRIGGERS 프리셋을 설치한다(synthetic 이벤트 + hist 트리거).
+
+        프리셋에 여러 변형(variants)이 있으면 앞에서부터 시도해 '실제로 먹히는'
+        변형을 자동 선택한다. 각 변형은 (1)합성 이벤트 생성 (2)트리거 설치
+        (3)결과 이벤트 실제 생성 확인 까지 통과해야 성공으로 본다. 실패하면 그
+        변형의 설치분을 롤백하고 다음 변형을 시도한다. 모두 실패하면 마지막
+        오류를 올린다.
+
         설치 항목은 추적해 두었다가 remove_correlation_presets() 로 정리한다.
-        실패하면 부분 설치분을 롤백하고 AdbError 를 올린다.
         반환: 결과(합성) 이벤트 (group, event) 또는 None.
         """
         preset = CORRELATION_TRIGGERS[name]
-        try:
-            # 1) 합성 이벤트 먼저 정의해야 트리거의 onmatch(...).<synth>() 가 유효하다.
-            #    정의 문자열의 첫 토큰이 이벤트 이름이라 정리용으로 따로 보관한다.
-            if preset.get("synthetic"):
-                self.create_synthetic_event(preset["synthetic"])
-                self._installed_synth.append(preset["synthetic"].split()[0])
-            # 2) 트리거들을 차례로 설치(설치 성공분만 추적 리스트에 누적).
-            for g, e, trig in preset["triggers"]:
-                self.set_event_trigger(g, e, trig)
-                self._installed_triggers.append((g, e, trig))
-        except AdbError:
-            # 중간에 실패하면(커널 미지원 등) 지금까지 설치한 것만 깔끔히 되돌린다.
-            self.remove_correlation_presets()   # 부분 설치 롤백
-            raise
-        # 3) 결과(합성) 이벤트를 enable 해야 캡처 로그에 그 줄이 찍힌다.
-        res = preset.get("result_event")
-        if res:
+        # 단일/다중 변형을 같은 코드로 다루기 위해 리스트로 정규화.
+        variants = preset.get("variants") or [preset]
+
+        last_err = None
+        for idx, variant in enumerate(variants):
             try:
-                self.enable_event(res[0], res[1], True)  # 결과 이벤트를 캡처에 포함
-            except AdbError:
-                pass                                     # enable 실패는 치명적이지 않음
-        return res
+                # 1) 합성 이벤트 먼저 정의해야 트리거의 onmatch(...).<synth>() 가 유효.
+                if variant.get("synthetic"):
+                    self.create_synthetic_event(variant["synthetic"])
+                    self._installed_synth.append(variant["synthetic"].split()[0])
+                # 2) 트리거들을 차례로 설치(성공분만 추적 리스트에 누적).
+                for g, e, trig in variant["triggers"]:
+                    self.set_event_trigger(g, e, trig)
+                    self._installed_triggers.append((g, e, trig))
+                # 3) 결과 이벤트가 '실제로' 만들어졌는지 확인(echo 가 통과해도 커널이
+                #    조용히 무시하는 경우가 있어 존재 검증이 필요하다).
+                res = variant.get("result_event")
+                if res:
+                    chk = self.adb.shell(
+                        f"test -e {self._path('events', res[0], res[1], 'enable')} "
+                        f"&& echo OK", check=False)
+                    if "OK" not in chk:
+                        raise AdbError(
+                            f"결과 이벤트 {res[0]}/{res[1]} 가 생성되지 않음(변형 불일치)")
+                    # 결과 이벤트를 enable 해야 캡처 로그에 그 줄이 찍힌다.
+                    try:
+                        self.enable_event(res[0], res[1], True)
+                    except AdbError:
+                        pass                  # enable 실패는 치명적이지 않음
+                self._active_correlation_variant = idx   # 어떤 변형이 먹었는지 기록
+                return res
+            except AdbError as e:
+                # 이 변형 실패 → 부분 설치분만 롤백하고 다음 변형 시도.
+                last_err = e
+                self.remove_correlation_presets()
+        # 모든 변형 실패.
+        raise last_err if last_err else AdbError("흐름 추적 트리거 설치 실패")
 
     def remove_correlation_presets(self):
         """설치한 모든 흐름 추적 트리거와 합성 이벤트를 제거한다."""

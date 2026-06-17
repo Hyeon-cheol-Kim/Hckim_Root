@@ -471,9 +471,11 @@ def _toggle_correlation(ft, preset_name):
         print("        대안: block 그룹만 켜고 캡처하면 analyzer 가 지연을 계산합니다"
               "(io_latency 없이도 issue↔complete 로 산출).")
         return
-    print(f"  흐름 추적 트리거 설치: {preset['desc']}")
+    vnum = ft._active_correlation_variant
+    vtag = f" (변형 V{vnum + 1} 적용)" if vnum is not None else ""
+    print(f"  흐름 추적 트리거 설치: {preset['desc']}{vtag}")
     if res:
-        print(f"  → 결과는 캡처 로그에 '{res[0]}:{res[1]}' 이벤트로 나타납니다(dev,sector,lat).")
+        print(f"  → 결과는 캡처 로그에 '{res[0]}:{res[1]}' 이벤트로 나타납니다(lat 등).")
 
 
 def _detail_events(ft, group_state):

@@ -200,8 +200,13 @@ ftrace 의 **hist/synthetic** 기능으로, `block_rq_issue` 와 `block_rq_compl
   ```
 - 끄기: 다시 `h`(또는 `a`). 트리거·합성 이벤트가 깨끗이 제거됩니다.
 - **요구**: 커널에 `CONFIG_HIST_TRIGGERS` / `CONFIG_SYNTH_EVENTS`. 없으면 설치가
-  실패하고 경고만 출력(나머지 캡처는 정상). best-effort 입니다.
-- `analyzer` 는 `io_latency` 가 있으면 그 값을 block 지연으로 **우선 사용**합니다.
+  실패하고 원인(권한/hist/synthetic)을 진단해 출력합니다(나머지 캡처는 정상).
+- **버전 호환**: onmatch 액션·합성 필드 문법이 커널마다 달라, 도구가 여러 변형
+  (V1 `.io_latency(...)` → V2 `.trace(io_latency,...)` → V3 `lat`만)을 순서대로
+  시도해 먹히는 것을 자동 선택합니다. 성공 시 `(변형 V_ 적용)` 으로 표시됩니다.
+  (V3 는 `lat` 만 남겨 `dev/sector` 가 없으므로, 이 경우 analyzer 는 io_latency
+  대신 issue↔complete 로 block 지연을 직접 계산합니다.)
+- `analyzer` 는 `io_latency` 에 `sector` 가 있으면 그 값을 block 지연으로 우선 사용합니다.
 
 수동으로 직접 확인하고 싶다면(참고):
 ```bash
