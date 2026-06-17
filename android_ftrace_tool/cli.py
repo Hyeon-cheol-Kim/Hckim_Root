@@ -25,11 +25,11 @@ import argparse
 try:
     from .core import (Adb, Ftrace, AdbError, default_log_filename,
                        STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER, EVENT_BUNDLES,
-                       IO_GRAPH_FUNCTIONS, CORRELATION_TRIGGERS)
+                       IO_GRAPH_FUNCTIONS, CORRELATION_TRIGGERS, STACK_TRACE_EVENTS)
 except ImportError:                       # 직접 실행(python cli.py)인 경우
     from core import (Adb, Ftrace, AdbError, default_log_filename,
                       STORAGE_EVENT_GROUPS, FLOW_PRESET_ORDER, EVENT_BUNDLES,
-                      IO_GRAPH_FUNCTIONS, CORRELATION_TRIGGERS)
+                      IO_GRAPH_FUNCTIONS, CORRELATION_TRIGGERS, STACK_TRACE_EVENTS)
 
 
 # ── 출력 헬퍼 ──────────────────────────────────────────────────────
@@ -188,13 +188,16 @@ def configure_options(ft):
         print("     ([O]=그룹전체  [~]=일부 이벤트  [ ]=꺼짐)")
 
         sync_on = _sync_bundle_on(group_state)   # fsync 묶음(핀포인트) 활성 여부
-        graph_on = (current_tracer == "function_graph")
+        # I/O 인과 보기: function_graph(트리) 또는 이벤트 스택트레이스(대체) 중 활성?
+        graph_mode = ("graph" if current_tracer == "function_graph"
+                      else "stack" if ft._installed_stack_triggers else None)
         corr_on = bool(ft._installed_triggers)   # 흐름 추적 트리거 설치 여부
         print("\n  ── 추가 명령 ──")
         print(f"   f) read/write/erase 플로우 전체 켜기(프리셋)")
         print(f"   y) fsync 추적: f2fs/ext4 레이어(f2fs_sync_file 등)  [현재: {'ON' if sync_on else 'OFF'}]")
         print(f"   d) 켜진 그룹의 개별 이벤트 세부 선택(빼기)")
-        print(f"   g) function_graph I/O 인과 보기(호출 중첩)  [현재: {'ON' if graph_on else 'OFF'}]")
+        print(f"   g) I/O 인과 보기(function_graph 또는 스택트레이스)  "
+              f"[현재: {'그래프' if graph_mode=='graph' else '스택' if graph_mode=='stack' else 'OFF'}]")
         print(f"   h) 흐름 추적 트리거: block I/O 지연(io_latency 합성)  [현재: {'ON' if corr_on else 'OFF'}]")
         print(f"   t) tracer 설정       (현재: {current_tracer})")
         print(f"   a) 전체 선택 해제")
@@ -219,9 +222,11 @@ def configure_options(ft):
                 except AdbError as e:
                     print(f"    [오류] {g} 해제 실패: {e}")
             group_state.clear()
-            # 흐름 추적 트리거/합성 이벤트도 함께 정리
+            # 흐름 추적 트리거/합성 이벤트/스택트레이스도 함께 정리
             if ft._installed_triggers:
                 ft.remove_correlation_presets()
+            if ft._installed_stack_triggers:
+                ft.remove_event_stacktrace()
             print("  모든 이벤트 그룹/흐름 추적 트리거를 해제했습니다.")
             continue
 
@@ -388,7 +393,12 @@ def _toggle_event_bundle(ft, group_state, available, bundle_name):
 
 
 def _toggle_graph_io(ft, current_tracer):
-    """(A) function_graph 로 I/O 인과(호출 중첩)를 보는 모드 on/off. 새 tracer 반환."""
+    """
+    (A) I/O 인과 보기 on/off. 새 tracer 를 반환한다.
+    function_graph 가 있으면 그걸로 호출 중첩(트리)을 보여주고, 미지원 커널이면
+    이벤트 스택트레이스(상위 호출 체인)로 대체한다.
+    """
+    # 1) 이미 켜져 있으면 해제 — function_graph 또는 stacktrace 중 활성인 쪽을 끈다.
     if current_tracer == "function_graph":
         try:
             ft.set_tracer("nop")
@@ -398,24 +408,39 @@ def _toggle_graph_io(ft, current_tracer):
             return current_tracer
         print("  function_graph I/O 보기 해제(tracer=nop)")
         return "nop"
+    if ft._installed_stack_triggers:
+        ft.remove_event_stacktrace()
+        print("  이벤트 스택트레이스(I/O 인과) 해제")
+        return current_tracer
 
-    # function_graph 지원 확인
-    if "function_graph" not in ft.list_available_tracers():
-        print("  [경고] 이 커널은 function_graph tracer 를 지원하지 않습니다.")
-        return current_tracer
-    try:
-        ft.set_tracer("function_graph")
-        applied = ft.set_graph_functions(IO_GRAPH_FUNCTIONS)
-    except AdbError as e:
-        print(f"  [오류] function_graph 설정 실패: {e}")
-        return current_tracer
+    # 2) function_graph 가 있으면 우선 사용(들여쓰기 호출 트리).
+    if "function_graph" in ft.list_available_tracers():
+        try:
+            ft.set_tracer("function_graph")
+            applied = ft.set_graph_functions(IO_GRAPH_FUNCTIONS)
+        except AdbError as e:
+            print(f"  [오류] function_graph 설정 실패: {e}")
+            return current_tracer
+        if applied:
+            print(f"  function_graph I/O 보기 ON — 범위 함수 {len(applied)}개: {', '.join(applied)}")
+        else:
+            print("  function_graph ON(범위 제한 함수가 없어 전체 호출이 잡혀 로그가 많을 수 있음)")
+        print("  ※ 동기 제출 경로의 인과(중첩)를 보여줍니다. 로그 형식이 이벤트 방식과")
+        print("    달라 사후 분석 스크립트(analyzer) 대상이 아닙니다.")
+        return "function_graph"
+
+    # 3) function_graph 미지원 → 이벤트 스택트레이스로 대체.
+    print("  [안내] 이 커널은 function_graph 미지원 → 이벤트 스택트레이스로 대체합니다.")
+    applied = ft.apply_event_stacktrace(STACK_TRACE_EVENTS)
     if applied:
-        print(f"  function_graph I/O 보기 ON — 범위 함수 {len(applied)}개: {', '.join(applied)}")
+        names = ", ".join(f"{g}/{e}" for g, e in applied)
+        print(f"  스택트레이스 부착: {names}")
+        print("  ※ 위 이벤트가 발생할 때마다 호출한 상위 함수 체인이 로그에 함께 찍힙니다.")
+        print("    (해당 그룹을 켜 둬야 이벤트가 실제로 발생합니다. 예: 'f' 프리셋)")
     else:
-        print("  function_graph ON(범위 제한 함수가 없어 전체 호출이 잡혀 로그가 많을 수 있음)")
-    print("  ※ 이 모드는 동기 제출 경로의 인과(중첩)를 보여줍니다. 로그 형식이")
-    print("    이벤트 방식과 달라 사후 분석 스크립트(analyzer) 대상이 아닙니다.")
-    return "function_graph"
+        print("  [경고] 이벤트 스택트레이스도 설치하지 못했습니다(이벤트 없음/미지원).")
+        print("        수동 대안: options/stacktrace 또는 bpftrace 의 kstack 사용.")
+    return current_tracer   # tracer 는 nop 그대로 유지
 
 
 def _toggle_correlation(ft, preset_name):

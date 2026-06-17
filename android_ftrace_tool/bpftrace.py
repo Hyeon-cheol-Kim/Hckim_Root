@@ -122,6 +122,18 @@ tracepoint:block:block_rq_issue
 END { clear(@in_read); }
 """,
     },
+
+    # function_graph 미지원 커널의 정밀 대체: 블록 제출 시 커널 호출 스택을 집계
+    "io_callstack": {
+        "desc": "block 제출의 커널 호출 스택(kstack) 집계 — function_graph 대체(정밀)",
+        "script": r"""// io_callstack.bt — 블록 I/O 제출의 호출 경로(누가 이 I/O 를 냈나)
+// function_graph 가 없을 때, block_rq_issue 마다 커널 스택을 모아
+// "vfs_read→f2fs→submit_bio→…" 같은 호출 경로별 발생 횟수를 보여준다.
+// (ftrace 의 이벤트 stacktrace 와 같은 정보지만, 경로별로 집계되어 한눈에 보임)
+BEGIN { printf("block submit callstacks (by kstack). Ctrl-C to print.\n"); }
+tracepoint:block:block_rq_issue { @[kstack] = count(); }
+""",
+    },
 }
 
 

@@ -287,6 +287,20 @@ IO_GRAPH_FUNCTIONS = [
     "scsi_queue_rq", "ufshcd_queuecommand",
 ]
 
+# ── (A-대체) function_graph 미지원 커널용: 이벤트 스택트레이스 ──────────
+# 양산 커널은 CONFIG_FUNCTION_GRAPH_TRACER 가 꺼져 있어 function_graph 가 없는
+# 경우가 많다. 그럴 때는 '스택트레이스 트리거'로 대체한다: 아래 이벤트가 찍힐 때마다
+# 그 이벤트를 호출한 상위 함수 체인(예: vfs_read→f2fs→submit_bio→…)을 커널 스택으로
+# 함께 남긴다. function_graph 의 들여쓰기 트리는 아니지만, 각 I/O 가 '누구로부터
+# 내려왔는지'를 복원할 수 있다. 함수 트레이서가 없어도(이벤트만 있으면) 동작한다.
+# 하위 계층 이벤트에 붙여야 호출 체인이 의미 있다(상위→하위로 내려온 경로가 보임).
+STACK_TRACE_EVENTS = [
+    ("block", "block_rq_issue"),
+    ("scsi", "scsi_dispatch_cmd_start"),
+    ("ufs", "ufshcd_command"),
+    ("f2fs", "f2fs_sync_file_enter"),
+]
+
 # ── (B) hist/synthetic 흐름 추적 트리거 프리셋 ───────────────────────────
 # 두 이벤트를 공유 키(dev,sector)로 커널에서 조인해 지연(latency)을 산출하고,
 # 그 결과를 합성(synthetic) 이벤트로 만들어 같은 로그에 남긴다.
@@ -336,6 +350,7 @@ class Ftrace:
         self.tracefs = tracefs        # detect_tracefs() 로 채워짐
         self._installed_triggers = []  # (group, event, trigger) — 정리용 추적
         self._installed_synth = []     # 생성한 synthetic 이벤트 이름 — 정리용
+        self._installed_stack_triggers = []  # stacktrace 붙인 (group, event) — 정리용
 
     # ── tracefs 경로 탐지 ─────────────────────────────────────────
     def detect_tracefs(self):
@@ -505,6 +520,32 @@ class Ftrace:
             self.remove_synthetic_event(name)
         self._installed_synth = []
 
+    # ── (A-대체) 이벤트 스택트레이스 ──────────────────────────────
+    def apply_event_stacktrace(self, events):
+        """
+        주어진 (group, event) 들에 'stacktrace' 트리거를 best-effort 로 설치한다.
+        이벤트가 없거나 트리거 미지원이면 그 항목만 건너뛴다. 실제로 설치된
+        (group, event) 목록을 반환하고, 정리용으로 추적한다.
+        주의: 스택은 '그 이벤트가 켜져 있고 실제로 발생할 때' 찍힌다(해당 그룹을
+        활성화해 둬야 함). 함수 트레이서가 없어도 동작한다.
+        """
+        applied = []
+        for g, e in events:
+            try:
+                # stacktrace 는 hist 와 달리 기본 이벤트 트리거라 폭넓게 지원된다.
+                self.set_event_trigger(g, e, "stacktrace")
+                self._installed_stack_triggers.append((g, e))
+                applied.append((g, e))
+            except AdbError:
+                pass   # 그 이벤트가 없거나 트리거 미지원 → 조용히 건너뜀
+        return applied
+
+    def remove_event_stacktrace(self):
+        """설치한 모든 stacktrace 트리거를 제거한다."""
+        for g, e in reversed(self._installed_stack_triggers):
+            self.clear_event_trigger(g, e, "stacktrace")
+        self._installed_stack_triggers = []
+
     def set_tracer(self, tracer):
         """current_tracer 를 설정(function_graph 등). 'nop' 으로 해제."""
         self._write("current_tracer", tracer)
@@ -595,8 +636,9 @@ class Ftrace:
     # ── 정리(원복) ────────────────────────────────────────────────
     def disable_all_events(self):
         """모든 이벤트/트리거/그래프설정을 끄고 tracer 를 nop 으로 되돌린다(정리용)."""
-        # 흐름 추적 트리거·합성 이벤트 먼저 제거(이벤트보다 먼저 떼야 안전)
+        # 흐름 추적 트리거·합성 이벤트·스택트레이스 먼저 제거(이벤트보다 먼저 떼야 안전)
         self.remove_correlation_presets()
+        self.remove_event_stacktrace()
         self.adb.shell(f"echo 0 > {self._path('events/enable')}", check=False)
         self.adb.shell(f"echo nop > {self._path('current_tracer')}", check=False)
         self.clear_graph_functions()

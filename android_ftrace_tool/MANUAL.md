@@ -111,7 +111,7 @@ python -m android_ftrace_tool --adb /path/to/adb
 | **`f`** | **플로우 프리셋** 전체 켜기 | `android_fs→f2fs→writeback→block→scsi→ufs`(지원분만) |
 | **`y`** | **fsync 추적**(파일시스템 레이어) on/off | `f2fs_sync_file_enter/exit`·`f2fs_write_checkpoint`(ext4면 `ext4_sync_file_*`). 디바이스에 있는 것만 자동 선택. `syscalls` 없어도 동작 |
 | **`d`** | 켜진 그룹의 **개별 이벤트 세부 선택**(빼기) | 예: `ufs` 에서 클럭/전원 이벤트 빼고 `ufshcd_command` 만 남김 → `[~]` |
-| **`g`** | **function_graph I/O 인과 보기** on/off | 5장 참고 |
+| **`g`** | **I/O 인과 보기** on/off (function_graph, 미지원 시 스택트레이스 대체) | 5장 참고 |
 | **`h`** | **흐름 추적 트리거**(block I/O 지연 → `io_latency`) on/off | 6장 참고 |
 | **`t`** | tracer 설정 | `nop`(기본, 이벤트 캡처) / `function_graph` 등 |
 | **`x`** | 스토리지만 보기 ↔ 전체 그룹 보기(고급) | 지원 그룹 전체 탐색 |
@@ -161,6 +161,30 @@ python -m android_ftrace_tool --adb /path/to/adb
 - 범위 함수 수정: `core.py` 의 `IO_GRAPH_FUNCTIONS` 리스트.
 - **주의**: 이 모드는 로그 형식이 "이벤트 나열"과 달라 **`analyzer` 대상이 아닙니다**.
   눈으로 인과를 따라갈 때 쓰세요.
+
+### function_graph 미지원 커널 — 이벤트 스택트레이스 대체
+
+양산 커널은 `CONFIG_FUNCTION_GRAPH_TRACER` 가 꺼져 있어 function_graph 가 없는
+경우가 많습니다. 이때 `g` 를 누르면 **자동으로 이벤트 스택트레이스로 대체**합니다.
+주요 하위 계층 이벤트(`block_rq_issue`, `scsi_dispatch_cmd_start`,
+`ufshcd_command`, `f2fs_sync_file_enter`)에 `stacktrace` 트리거를 붙여, 그 이벤트가
+발생할 때마다 **그것을 호출한 상위 함수 체인**을 로그에 함께 남깁니다.
+
+```
+block_rq_issue: 254,52 R ... 2752512 + 16 [app]
+   => blk_mq_submit_bio
+   => submit_bio
+   => f2fs_file_read_iter
+   => vfs_read
+   => __arm64_sys_read   ← "이 read() 가 이 블록 요청을 냈다"는 호출 경로
+```
+
+- 함수 트레이서가 없어도(이벤트 트리거만으로) 동작합니다.
+- **해당 그룹을 켜 둬야** 이벤트가 실제로 발생합니다(예: `f` 프리셋으로 block/ufs ON).
+- 대상 이벤트 목록: `core.py` 의 `STACK_TRACE_EVENTS`. 디바이스에 있는 것만 부착됩니다.
+- 끄기: 다시 `g`(또는 `a`) → `stacktrace` 트리거가 깨끗이 제거됩니다.
+- 더 정밀한 대안: bpftrace 의 `kstack`(예: `block_latency` 스크립트에 추가), 또는
+  전역 `options/stacktrace`.
 
 ---
 
@@ -277,6 +301,7 @@ python -m android_ftrace_tool.bpftrace check [옵션]         # 9장 참고
 | `ufs_latency` | tag(send↔complete) | UFS device 지연을 **opcode별** 히스토그램 |
 | `vfs_rw_latency` | tid | vfs read/write 동기 경로 지연(프로세스별) |
 | `read_to_device` | 같은 tid | `read()` 구간에 발생한 block 제출 귀속(동기 read 인과) |
+| `io_callstack` | kstack | block 제출의 커널 호출 스택 집계 — **function_graph 정밀 대체** |
 
 **예시 — 블록 지연 10초 측정:**
 ```bash
@@ -440,6 +465,7 @@ python -m android_ftrace_tool
 | analyzer 에서 "파일(추정) 0/N" | `android_fs`/`f2fs` 미캡처, 또는 파티션 오프셋 추정 실패. `f` 프리셋으로 재캡처 |
 | `android_fs` 가 `[X]`(미지원) | 벤더 전용 그룹이라 GKI 등엔 없음. `f2fs`(특히 `f2fs_map_blocks` + `f2fs_dataread_start`)로 대체 — 경로명만 빠지고 inode·LBA 흐름 추적은 정상 |
 | `syscalls` 가 `[X]`(미지원) | `CONFIG_FTRACE_SYSCALLS` 없음. fsync 등은 `f2fs_sync_file_enter/exit`(f2fs 그룹) 또는 bpftrace `vfs_rw_latency` 로 대체 |
+| function_graph 미지원 | `CONFIG_FUNCTION_GRAPH_TRACER` 없음(양산 커널 흔함). `g` 가 **이벤트 스택트레이스**로 자동 대체(상위 호출 체인). 더 정밀히는 bpftrace `kstack` |
 | analyzer 에서 ufs 0건 | `ufs` 그룹 미캡처. `f` 또는 `ufs` 켜고 재캡처 |
 | bpftrace `CANNOT LINK EXECUTABLE` | 동적 링크 바이너리. **정적(static) aarch64** 빌드 필요(10장) |
 | bpftrace 가 kprobe 에서 실패 | BTF/`CONFIG_KPROBES` 부족. `bpftrace check` 로 확인 |

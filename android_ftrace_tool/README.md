@@ -64,7 +64,8 @@ python -m android_ftrace_tool --adb /path/to/adb
    - **`y`** — **fsync 추적**(f2fs/ext4 레이어) on/off (아래 "sync 추적" 참고)
    - **`d`** — 켜진 그룹의 **개별 이벤트 세부 선택**(예: `ufs` 에서 클럭/전원 이벤트만
      빼고 `ufshcd_command`·`ufshcd_uic_command` 만 남기기) → 표시는 `[~]`(일부)
-   - **`g`** — **function_graph I/O 인과 보기**(아래 "로그 간 흐름 추적" 참고)
+   - **`g`** — **I/O 인과 보기**: function_graph(호출 트리), 미지원 커널이면
+     **이벤트 스택트레이스**(상위 호출 체인)로 자동 대체 (아래 "로그 간 흐름 추적" 참고)
    - **`h`** — **흐름 추적 트리거**(block I/O 지연 → `io_latency` 합성 이벤트)
    - **`x`** — 전체 그룹 보기(고급), **`t`** — tracer, **`a`** — 전체 해제, **`s`** — 설정완료
 
