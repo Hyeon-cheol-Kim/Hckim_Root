@@ -8,6 +8,11 @@ Android ftrace 로그 사후 분석 (correlation analyzer)
   - 파일 ↔ 블록          : f2fs_map_blocks 의 m_pblk(파일 물리블록) + 파티션 오프셋
   - 앱 ↔ 파일            : inode(ino) + 파일 오프셋(=논리블록)
 
+앱 I/O 이벤트 소스(둘 중 있는 것을 사용):
+  - android_fs_* : 벤더 전용. 경로(pathbase)·offset·bytes 제공(있으면 최선)
+  - f2fs_dataread_start / f2fs_datawrite_start : android_fs 가 없는 커널의 대체.
+    ino·pos·len·cmdline·pid 는 주지만 '경로'는 없음 → 파일명은 미상으로 남는다.
+
 한계(로그만으로 100% 인과 보장 불가):
   - read 캐시 히트는 하위 명령이 없고, readahead/병합으로 1:N·N:1 발생
   - write 는 writeback 스레드가 나중에 flush → 앱과 다른 컨텍스트/시각
@@ -50,11 +55,18 @@ _INO_RE = re.compile(r'ino\s*=?\s*(\d+)')
 _PBLK_RE = re.compile(r'm_pblk\s*=\s*(\d+)')
 _LBLK_RE = re.compile(r'm_lblk\s*=\s*(\d+)')
 _MLEN_RE = re.compile(r'm_len\s*=\s*(\d+)')
-# android_fs
+# android_fs (벤더 전용. dev/ino/pathbase/bytes/offset/cmdline/pid)
 _AFS_INO_RE = re.compile(r'\bino\s+(\d+)')
 _AFS_PATH_RE = re.compile(r'pathbase\s+(\S+)')
 _AFS_BYTES_RE = re.compile(r'bytes\s+(\d+)')
 _AFS_OFF_RE = re.compile(r'offset\s+(\d+)')
+# f2fs_dataread_start / f2fs_datawrite_start (android_fs 대체)
+# 형식 예) "dev = (254,52), ino = 24, pos = 0, len = 4096, cmdline = app, pid = 1234, ..."
+# 주의: 이 이벤트는 파일 '경로'를 제공하지 않는다(ino/pos/len/cmdline/pid 만).
+_F2FS_POS_RE = re.compile(r'\bpos\s*=\s*(\d+)')      # 파일 오프셋
+_F2FS_LEN_RE = re.compile(r'\blen\s*=\s*(\d+)')      # 바이트 길이
+_F2FS_CMD_RE = re.compile(r'cmdline\s*=\s*(\S+)')    # 프로세스 이름
+_F2FS_PID_RE = re.compile(r'\bpid\s*=\s*(\d+)')      # PID
 # io_latency 합성 이벤트
 _SYN_LAT_RE = re.compile(r'lat=(\d+)')
 _SYN_SECTOR_RE = re.compile(r'sector=(\d+)')
@@ -168,6 +180,27 @@ def _dispatch(p, ev, rest, ts, m):
                              "offset": int(off.group(1)) if off else None,
                              "op": "read" if "read" in ev else "write",
                              "pid": m.group("pid"), "task": m.group("task")})
+        p.matched += 1
+    elif ev.startswith("f2fs_dataread") or ev.startswith("f2fs_datawrite"):
+        # android_fs 가 없는 커널의 대체 경로: f2fs 자체 앱 I/O 추적 이벤트.
+        # 같은 p.android_fs 리스트에 넣어 이후 ino→파일 매핑/집계를 공유한다.
+        # 단, f2fs 이벤트엔 경로가 없어 path 는 "?" 로 둔다(커널 한계).
+        ino = _INO_RE.search(rest)
+        pos = _F2FS_POS_RE.search(rest)
+        length = _F2FS_LEN_RE.search(rest)
+        cmd = _F2FS_CMD_RE.search(rest)
+        pid = _F2FS_PID_RE.search(rest)
+        p.android_fs.append({
+            "ts": ts,
+            "ino": int(ino.group(1)) if ino else None,
+            "path": "?",                               # 경로 미제공 → 미상
+            "bytes": int(length.group(1)) if length else None,
+            "offset": int(pos.group(1)) if pos else None,
+            "op": "read" if "read" in ev else "write",
+            # 프로세스 정보는 이벤트 필드(cmdline/pid)를 우선, 없으면 라인 헤더 값.
+            "pid": pid.group(1) if pid else m.group("pid"),
+            "task": cmd.group(1) if cmd else m.group("task"),
+        })
         p.matched += 1
     elif ev == "io_latency":   # 합성 이벤트(흐름 추적 트리거 결과)
         lat = _SYN_LAT_RE.search(rest)
@@ -369,7 +402,7 @@ def build_report(p, corr, limit=50):
     A("=" * 70)
     A(f" 파싱 라인: {p.total}  (인식 이벤트: {p.matched})")
     A(f" 이벤트 수 — ufs:{len(p.ufs)} block_issue:{len(p.block_issue)} "
-      f"scsi:{len(p.scsi)} f2fs_map:{len(p.f2fs_map)} android_fs:{len(p.android_fs)} "
+      f"scsi:{len(p.scsi)} f2fs_map:{len(p.f2fs_map)} app_fs:{len(p.android_fs)} "
       f"io_latency:{len(p.io_latency)}")
     A(f" sector=LBA×{corr['ratio']} 로 추정, 파티션 오프셋(sector) 추정: {corr['part_off']}")
     if not corr["ufs_lat"]:

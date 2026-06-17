@@ -238,6 +238,11 @@ python -m android_ftrace_tool.analyzer capture.log --limit 100      # 체인 100
 > 자동 추정: `sector = LBA × ratio` 의 ratio(보통 8)와 파티션 오프셋을 로그에서
 > 추정합니다. `android_fs`/`f2fs` 가 캡처에 없으면 "파일(추정)"은 비어 있을 수 있습니다.
 
+> **앱 I/O 이벤트 소스**: analyzer 는 `android_fs_*`(벤더 전용, 경로 제공)와
+> `f2fs_dataread_start`/`f2fs_datawrite_start`(대체, ino·offset·process 제공, **경로
+> 없음**) 중 **있는 것**을 사용합니다. `android_fs` 미지원 커널에서도 후자가 있으면
+> inode 까지는 흐름 추적이 되고, 파일명만 `?` 로 표시됩니다.
+
 ---
 
 ## 8. 기능 5 — bpftrace 커널-내 1:1 흐름 추적 (`bpftrace`)
@@ -433,6 +438,8 @@ python -m android_ftrace_tool
 | 이벤트가 `[X]`(미지원) | 해당 커널이 그 tracepoint 를 안 가짐(정상). 지원분만 사용 |
 | `h` 설치 실패 경고 | `CONFIG_HIST_TRIGGERS`/`CONFIG_SYNTH_EVENTS` 없음. 캡처 자체는 정상 진행 |
 | analyzer 에서 "파일(추정) 0/N" | `android_fs`/`f2fs` 미캡처, 또는 파티션 오프셋 추정 실패. `f` 프리셋으로 재캡처 |
+| `android_fs` 가 `[X]`(미지원) | 벤더 전용 그룹이라 GKI 등엔 없음. `f2fs`(특히 `f2fs_map_blocks` + `f2fs_dataread_start`)로 대체 — 경로명만 빠지고 inode·LBA 흐름 추적은 정상 |
+| `syscalls` 가 `[X]`(미지원) | `CONFIG_FTRACE_SYSCALLS` 없음. fsync 등은 `f2fs_sync_file_enter/exit`(f2fs 그룹) 또는 bpftrace `vfs_rw_latency` 로 대체 |
 | analyzer 에서 ufs 0건 | `ufs` 그룹 미캡처. `f` 또는 `ufs` 켜고 재캡처 |
 | bpftrace `CANNOT LINK EXECUTABLE` | 동적 링크 바이너리. **정적(static) aarch64** 빌드 필요(10장) |
 | bpftrace 가 kprobe 에서 실패 | BTF/`CONFIG_KPROBES` 부족. `bpftrace check` 로 확인 |
