@@ -453,8 +453,23 @@ def _toggle_correlation(ft, preset_name):
     try:
         res = ft.apply_correlation_preset(preset_name)
     except AdbError as e:
-        print(f"  [경고] 흐름 추적 트리거 설치 실패(커널 미지원 가능): {e}")
-        print("        CONFIG_HIST_TRIGGERS / CONFIG_SYNTH_EVENTS 필요. 건너뜁니다.")
+        print(f"  [경고] 흐름 추적 트리거 설치 실패: {e}")
+        # 어디서 막혔는지 실측 진단 — 권한 / hist / synthetic 구분
+        diag = ft.diagnose_hist_support()
+        if not diag["writable"]:
+            print("        · 원인 추정: tracefs 쓰기 권한 없음(root 아님). "
+                  "adb root 또는 su 우회가 필요합니다.")
+        else:
+            if not diag["hist"]:
+                print("        · 원인 추정: hist 트리거 미지원(CONFIG_HIST_TRIGGERS). "
+                      "trigger 파일은 있어도 hist: 문법은 별도 옵션이 필요합니다.")
+            if not diag["synth"]:
+                print("        · 원인 추정: synthetic_events 없음(CONFIG_SYNTH_EVENTS).")
+            if diag["hist"] and diag["synth"]:
+                print("        · hist/synthetic 은 되는데 실패 → onmatch/필드 문법이 "
+                      "이 커널 버전과 다를 수 있습니다.")
+        print("        대안: block 그룹만 켜고 캡처하면 analyzer 가 지연을 계산합니다"
+              "(io_latency 없이도 issue↔complete 로 산출).")
         return
     print(f"  흐름 추적 트리거 설치: {preset['desc']}")
     if res:

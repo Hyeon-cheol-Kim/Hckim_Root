@@ -546,6 +546,42 @@ class Ftrace:
             self.clear_event_trigger(g, e, "stacktrace")
         self._installed_stack_triggers = []
 
+    def diagnose_hist_support(self):
+        """
+        hist 트리거 / synthetic 이벤트 지원 여부를 '실측'으로 진단한다.
+        흐름 추적 트리거(h) 설치가 실패했을 때, 원인이
+          (1) 쓰기 권한(root) 인지
+          (2) hist 트리거 미지원(CONFIG_HIST_TRIGGERS) 인지
+          (3) synthetic 이벤트 미지원(CONFIG_SYNTH_EVENTS) 인지
+        를 구분하기 위함. 부작용 없이 시험용 트리거를 걸었다가 바로 제거한다.
+        반환: dict(writable, hist, synth, detail).
+        """
+        result = {"writable": False, "hist": False, "synth": False, "detail": ""}
+        trig = self._path("events", "block", "block_rq_issue", "trigger")
+
+        # (2) bare hist 트리거가 먹는지 — 키만 있는 최소 hist 로 시험.
+        #     쓰기 권한이 없으면 여기서 'Permission denied' 가 난다(권한 문제 구분).
+        try:
+            self.adb.shell(f"echo 'hist:keys=dev' > {trig}", check=True)
+            result["writable"] = True
+            result["hist"] = True
+            # 시험용 트리거 즉시 제거(원상복구)
+            self.adb.shell(f"echo '!hist:keys=dev' > {trig}", check=False)
+        except AdbError as e:
+            msg = str(e)
+            result["detail"] = msg
+            # 권한 문제와 '기능 미지원(Invalid argument)' 을 메시지로 구분
+            if "ermission" in msg or "denied" in msg.lower():
+                result["writable"] = False
+            else:
+                result["writable"] = True   # 쓰기는 됐으나 hist 자체가 거부됨
+
+        # (3) synthetic_events 파일 존재 여부(CONFIG_SYNTH_EVENTS).
+        out = self.adb.shell(
+            f"test -e {self._path('synthetic_events')} && echo OK", check=False)
+        result["synth"] = "OK" in out
+        return result
+
     def set_tracer(self, tracer):
         """current_tracer 를 설정(function_graph 등). 'nop' 으로 해제."""
         self._write("current_tracer", tracer)

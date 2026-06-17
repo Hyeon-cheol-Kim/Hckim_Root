@@ -461,7 +461,7 @@ python -m android_ftrace_tool
 | 디바이스가 안 보임 | USB 디버깅 ON, 케이블/`adb devices` 확인, 폰의 인증 팝업 허용 |
 | tracefs 를 못 찾음 | root 필요. `adb root` 또는 도구의 su 우회. 커널이 tracefs 미지원일 수 있음 |
 | 이벤트가 `[X]`(미지원) | 해당 커널이 그 tracepoint 를 안 가짐(정상). 지원분만 사용 |
-| `h` 설치 실패 경고 | `CONFIG_HIST_TRIGGERS`/`CONFIG_SYNTH_EVENTS` 없음. 캡처 자체는 정상 진행 |
+| `h` 설치 실패 경고 | 도구가 원인을 진단해 출력(권한/hist/synthetic 구분). trigger 파일이 있어도 `hist:` 문법은 `CONFIG_HIST_TRIGGERS`, `onmatch`+합성 이벤트는 `CONFIG_SYNTH_EVENTS` 가 필요. **대안**: `block` 그룹만 켜고 캡처하면 analyzer 가 issue↔complete 로 지연 계산(io_latency 불필요) |
 | analyzer 에서 "파일(추정) 0/N" | `android_fs`/`f2fs` 미캡처, 또는 파티션 오프셋 추정 실패. `f` 프리셋으로 재캡처 |
 | `android_fs` 가 `[X]`(미지원) | 벤더 전용 그룹이라 GKI 등엔 없음. `f2fs`(특히 `f2fs_map_blocks` + `f2fs_dataread_start`)로 대체 — 경로명만 빠지고 inode·LBA 흐름 추적은 정상 |
 | `syscalls` 가 `[X]`(미지원) | `CONFIG_FTRACE_SYSCALLS` 없음. fsync 등은 `f2fs_sync_file_enter/exit`(f2fs 그룹) 또는 bpftrace `vfs_rw_latency` 로 대체 |
