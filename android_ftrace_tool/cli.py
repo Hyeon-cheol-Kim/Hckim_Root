@@ -187,12 +187,12 @@ def configure_options(ft):
                 print(f"   --) [X] {g:<11} - {d}  (이 디바이스 미지원)")
         print("     ([O]=그룹전체  [~]=일부 이벤트  [ ]=꺼짐)")
 
-        sync_on = "syscalls" in group_state      # sync 묶음 활성 여부(근사)
+        sync_on = _sync_bundle_on(group_state)   # fsync 묶음(핀포인트) 활성 여부
         graph_on = (current_tracer == "function_graph")
         corr_on = bool(ft._installed_triggers)   # 흐름 추적 트리거 설치 여부
         print("\n  ── 추가 명령 ──")
         print(f"   f) read/write/erase 플로우 전체 켜기(프리셋)")
-        print(f"   y) sync 시스템콜 추적(fsync/sync/...)  [현재: {'ON' if sync_on else 'OFF'}]")
+        print(f"   y) fsync 추적: f2fs/ext4 레이어(f2fs_sync_file 등)  [현재: {'ON' if sync_on else 'OFF'}]")
         print(f"   d) 켜진 그룹의 개별 이벤트 세부 선택(빼기)")
         print(f"   g) function_graph I/O 인과 보기(호출 중첩)  [현재: {'ON' if graph_on else 'OFF'}]")
         print(f"   h) 흐름 추적 트리거: block I/O 지연(io_latency 합성)  [현재: {'ON' if corr_on else 'OFF'}]")
@@ -230,7 +230,7 @@ def configure_options(ft):
             continue
 
         if cmd == "y":
-            _toggle_event_bundle(ft, group_state, available, "sync_syscalls")
+            _toggle_event_bundle(ft, group_state, available, "sync_events")
             continue
 
         if cmd == "d":
@@ -303,9 +303,22 @@ def _apply_flow_preset(ft, group_state, available):
         print(f"  (미지원으로 제외: {', '.join(skipped)})")
 
 
+def _sync_bundle_on(group_state):
+    """
+    fsync 묶음(sync_events)이 '핀포인트로' 켜져 있는지 메뉴 표시용으로 판단한다.
+    adb 호출 없이 group_state 만 본다: 묶음 이벤트 중 하나라도 그룹의 부분집합(set)에
+    들어 있으면 ON 으로 본다. (그룹 전체 ALL 은 묶음 토글이 아니므로 여기선 제외)
+    """
+    for g, e in EVENT_BUNDLES["sync_events"]["events"]:
+        st = group_state.get(g)
+        if isinstance(st, set) and e in st:
+            return True
+    return False
+
+
 def _toggle_event_bundle(ft, group_state, available, bundle_name):
     """
-    개별 이벤트 묶음(예: sync 시스템콜)을 한 번에 켜고/끈다.
+    개별 이벤트 묶음(예: fsync 이벤트)을 한 번에 켜고/끈다.
     그룹 전체가 아니라 묶음에 정의된 (group, event) 만 핀포인트로 제어하며,
     group_state 의 "부분 이벤트(set)" 모델에 반영한다.
     """
@@ -315,20 +328,25 @@ def _toggle_event_bundle(ft, group_state, available, bundle_name):
         return
 
     groups_used = sorted({g for g, _ in bundle["events"]})
-    # 묶음이 쓰는 그룹이 디바이스에 있는지 확인
-    for g in groups_used:
-        if g not in available:
-            print(f"  [경고] '{g}' 그룹이 없어 '{bundle['desc']}' 를 켤 수 없습니다.")
-            return
+    # 묶음이 쓰는 그룹 중 '디바이스에 있는' 것만 사용한다(없는 그룹은 통째로 제외).
+    # 예) syscalls/ext4 가 없어도 f2fs 만 있으면 f2fs fsync 이벤트로 진행한다.
+    usable_groups = [g for g in groups_used if g in available]
+    missing_groups = [g for g in groups_used if g not in available]
+    if not usable_groups:
+        print(f"  [경고] '{bundle['desc']}' 에 필요한 그룹이 하나도 없습니다(미지원).")
+        return
+    if missing_groups:
+        print(f"  (없는 그룹 제외: {', '.join(missing_groups)})")
 
-    # 디바이스에 실제 존재하는 이벤트만 대상으로 한다(커널마다 일부 누락 가능).
+    # 사용 가능한 그룹에 대해, 그 안에 실제 존재하는 이벤트만 대상으로 한다.
     existing = {}
-    for g in groups_used:
+    for g in usable_groups:
         try:
             existing[g] = set(ft.list_events_in_group(g))
         except AdbError as e:
             print(f"  [오류] '{g}' 이벤트 목록 조회 실패: {e}")
             return
+    # existing 에 없는 (group,event) 는 자연히 빠진다(없는 그룹/이벤트 모두 제외됨).
     target = [(g, e) for g, e in bundle["events"] if e in existing.get(g, set())]
     if not target:
         print("  [경고] 이 디바이스에 해당 이벤트가 없습니다(미지원).")

@@ -247,25 +247,27 @@ FLOW_PRESET_ORDER = ["android_fs", "f2fs", "writeback", "block", "scsi", "ufs"]
 
 
 # ── 개별 이벤트 묶음 프리셋 ─────────────────────────────────────────
-# 그룹 전체를 켜면 로그가 폭발하는 경우(예: syscalls), 관심 있는 개별 이벤트만
-# 핀포인트로 켜기 위한 묶음. 각 묶음은 (group, event) 쌍의 리스트.
-# 예) sync 계열 시스템콜은 syscalls 그룹 안에 있지만, 그룹 전체(수백 개)가 아니라
-#     fsync/fdatasync/sync/syncfs/sync_file_range 진입·종료만 켠다.
+# 관심 있는 이벤트만 핀포인트로 켜기 위한 묶음. 각 묶음은 (group, event) 쌍의 리스트.
+# 묶음에 적힌 이벤트 중 디바이스에 실제 존재하는 것만 켜진다(없는 건 자동 제외).
 # (UI 가 아닌 도메인 지식이므로 core 에 두어 GUI 에서도 재사용 가능)
+#
+# fsync/sync 추적은 계층마다 이벤트가 다르다:
+#   - 시스템콜 계층: syscalls/sys_enter_fsync 등 — CONFIG_FTRACE_SYSCALLS 필요(미지원多)
+#   - 파일시스템 계층: f2fs_sync_file_enter/exit, ext4_sync_file_enter/exit
+# syscalls 그룹이 없는 커널(GKI 등)이 많으므로, **파일시스템 레이어 fsync** 를
+# 기본으로 삼는다. 이 이벤트들은 실제 fsync 가 어느 파일(ino)에서 일어났는지까지
+# 보여줘 흐름 추적에도 더 유용하다.
 EVENT_BUNDLES = {
-    "sync_syscalls": {
-        "desc": "sync 계열 시스템콜 진입/종료 — fsync/fdatasync/sync/syncfs/sync_file_range",
+    "sync_events": {
+        "desc": "fsync/sync 추적 — f2fs/ext4 파일시스템 레이어(f2fs_sync_file 등)",
         "events": [
-            ("syscalls", "sys_enter_fsync"),
-            ("syscalls", "sys_exit_fsync"),
-            ("syscalls", "sys_enter_fdatasync"),
-            ("syscalls", "sys_exit_fdatasync"),
-            ("syscalls", "sys_enter_sync"),
-            ("syscalls", "sys_exit_sync"),
-            ("syscalls", "sys_enter_syncfs"),
-            ("syscalls", "sys_exit_syncfs"),
-            ("syscalls", "sys_enter_sync_file_range"),
-            ("syscalls", "sys_exit_sync_file_range"),
+            # F2FS: 파일별 fsync 진입/종료 + 체크포인트(저널 flush)
+            ("f2fs", "f2fs_sync_file_enter"),
+            ("f2fs", "f2fs_sync_file_exit"),
+            ("f2fs", "f2fs_write_checkpoint"),
+            # EXT4(/data 가 ext4 인 단말 대비): 파일별 fsync 진입/종료
+            ("ext4", "ext4_sync_file_enter"),
+            ("ext4", "ext4_sync_file_exit"),
         ],
     },
 }

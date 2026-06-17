@@ -109,7 +109,7 @@ python -m android_ftrace_tool --adb /path/to/adb
 |------|------|-----------|
 | **번호** | 그룹 on/off 토글 | `3` → 3번 그룹 토글. 표시 `[O]`켜짐 `[ ]`꺼짐 `[X]`미지원 `[~]`일부 |
 | **`f`** | **플로우 프리셋** 전체 켜기 | `android_fs→f2fs→writeback→block→scsi→ufs`(지원분만) |
-| **`y`** | **sync 시스템콜** 추적 on/off | `fsync`/`fdatasync`/`sync` 등 syscall tracepoint |
+| **`y`** | **fsync 추적**(파일시스템 레이어) on/off | `f2fs_sync_file_enter/exit`·`f2fs_write_checkpoint`(ext4면 `ext4_sync_file_*`). 디바이스에 있는 것만 자동 선택. `syscalls` 없어도 동작 |
 | **`d`** | 켜진 그룹의 **개별 이벤트 세부 선택**(빼기) | 예: `ufs` 에서 클럭/전원 이벤트 빼고 `ufshcd_command` 만 남김 → `[~]` |
 | **`g`** | **function_graph I/O 인과 보기** on/off | 5장 참고 |
 | **`h`** | **흐름 추적 트리거**(block I/O 지연 → `io_latency`) on/off | 6장 참고 |

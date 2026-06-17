@@ -61,7 +61,7 @@ python -m android_ftrace_tool --adb /path/to/adb
    조작 명령:
    - **번호** — 그룹 전체 on/off 토글
    - **`f`** — read/write/erase **플로우 전체 켜기**(위 5개 그룹을 한 번에, 지원분만)
-   - **`y`** — **sync 시스템콜 추적** on/off (아래 "sync 추적" 참고)
+   - **`y`** — **fsync 추적**(f2fs/ext4 레이어) on/off (아래 "sync 추적" 참고)
    - **`d`** — 켜진 그룹의 **개별 이벤트 세부 선택**(예: `ufs` 에서 클럭/전원 이벤트만
      빼고 `ufshcd_command`·`ufshcd_uic_command` 만 남기기) → 표시는 `[~]`(일부)
    - **`g`** — **function_graph I/O 인과 보기**(아래 "로그 간 흐름 추적" 참고)
@@ -69,11 +69,12 @@ python -m android_ftrace_tool --adb /path/to/adb
    - **`x`** — 전체 그룹 보기(고급), **`t`** — tracer, **`a`** — 전체 해제, **`s`** — 설정완료
 
    **sync 추적**: `fsync`/`sync` 동작은 계층마다 다른 이벤트로 나타납니다.
-   파일시스템 레벨(`f2fs_sync_file_enter/exit`, `f2fs_write_checkpoint`)·라이트백·
-   블록 FLUSH·UFS `SYNCHRONIZE_CACHE`(opcode 0x35)는 위 그룹들로 이미 잡힙니다.
-   추가로 **시스템콜 진입점**(`sys_enter_fsync` 등)까지 보려면 `y` 를 누르세요.
-   `syscalls` 그룹 전체(수백 개)가 아니라 sync 계열 이벤트만 핀포인트로 켜므로
-   로그가 폭발하지 않습니다. (정의: `core.py` 의 `EVENT_BUNDLES`)
+   `y` 는 **파일시스템 레이어 fsync 이벤트**(`f2fs_sync_file_enter/exit`,
+   `f2fs_write_checkpoint`, ext4 단말이면 `ext4_sync_file_*`)만 핀포인트로 켭니다.
+   이 이벤트는 **어느 파일(ino)에서 fsync 가 일어났는지**까지 보여줘 흐름 추적에
+   유용하고, `syscalls` 그룹(`CONFIG_FTRACE_SYSCALLS`)이 없는 커널에서도 동작합니다.
+   (디바이스에 있는 이벤트만 자동 선택. 정의: `core.py` 의 `EVENT_BUNDLES`)
+   블록 FLUSH·UFS `SYNCHRONIZE_CACHE`(opcode 0x35)는 `block`/`ufs` 그룹으로 잡힙니다.
 
    상태 표시: `[O]` 그룹 전체 / `[~]` 일부 이벤트만 / `[ ]` 꺼짐
 
