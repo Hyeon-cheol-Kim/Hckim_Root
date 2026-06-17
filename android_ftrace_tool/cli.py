@@ -431,14 +431,20 @@ def _toggle_graph_io(ft, current_tracer):
 
     # 3) function_graph 미지원 → 이벤트 스택트레이스로 대체.
     print("  [안내] 이 커널은 function_graph 미지원 → 이벤트 스택트레이스로 대체합니다.")
-    applied = ft.apply_event_stacktrace(STACK_TRACE_EVENTS)
+    applied, failed = ft.apply_event_stacktrace(STACK_TRACE_EVENTS)
     if applied:
         names = ", ".join(f"{g}/{e}" for g, e in applied)
         print(f"  스택트레이스 부착: {names}")
         print("  ※ 위 이벤트가 발생할 때마다 호출한 상위 함수 체인이 로그에 함께 찍힙니다.")
         print("    (해당 그룹을 켜 둬야 이벤트가 실제로 발생합니다. 예: 'f' 프리셋)")
-    else:
-        print("  [경고] 이벤트 스택트레이스도 설치하지 못했습니다(이벤트 없음/미지원).")
+    if failed:
+        # 실패는 더 이상 숨기지 않는다 — 어떤 이벤트가 왜 안 됐는지 보여준다.
+        for g, e, why in failed:
+            print(f"  [제외] {g}/{e}: {why}")
+    if not applied and not failed:
+        print("  [경고] 부착할 대상 이벤트가 없습니다.")
+    elif not applied:
+        print("  [경고] 스택트레이스를 하나도 설치하지 못했습니다.")
         print("        수동 대안: options/stacktrace 또는 bpftrace 의 kstack 사용.")
     return current_tracer   # tracer 는 nop 그대로 유지
 

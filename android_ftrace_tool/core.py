@@ -572,22 +572,28 @@ class Ftrace:
     # ── (A-대체) 이벤트 스택트레이스 ──────────────────────────────
     def apply_event_stacktrace(self, events):
         """
-        주어진 (group, event) 들에 'stacktrace' 트리거를 best-effort 로 설치한다.
-        이벤트가 없거나 트리거 미지원이면 그 항목만 건너뛴다. 실제로 설치된
-        (group, event) 목록을 반환하고, 정리용으로 추적한다.
-        주의: 스택은 '그 이벤트가 켜져 있고 실제로 발생할 때' 찍힌다(해당 그룹을
+        주어진 (group, event) 들에 'stacktrace' 트리거를 설치한다.
+        반환: (applied, failed) — applied=[(g,e)...], failed=[(g,e,사유)...].
+
+        주의 1) 트리거는 도구를 종료해도 커널에 '잔류'한다. 이미 같은 stacktrace
+        트리거가 남아 있으면 재설치가 "이미 있음(File exists)"으로 실패하므로,
+        설치 전에 먼저 같은 트리거를 제거(idempotent)해 항상 깨끗하게 새로 건다.
+        주의 2) 스택은 '그 이벤트가 켜져 있고 실제로 발생할 때' 찍힌다(해당 그룹을
         활성화해 둬야 함). 함수 트레이서가 없어도 동작한다.
         """
-        applied = []
+        applied, failed = [], []
         for g, e in events:
+            # (1) 잔류분 제거 후 새로 설치 → 중복으로 인한 실패 방지(멱등).
+            self.clear_event_trigger(g, e, "stacktrace")
             try:
-                # stacktrace 는 hist 와 달리 기본 이벤트 트리거라 폭넓게 지원된다.
                 self.set_event_trigger(g, e, "stacktrace")
-                self._installed_stack_triggers.append((g, e))
-                applied.append((g, e))
-            except AdbError:
-                pass   # 그 이벤트가 없거나 트리거 미지원 → 조용히 건너뜀
-        return applied
+            except AdbError as err:
+                # 이벤트가 없거나(미지원) 다른 트리거가 막는 경우 → 사유를 보존.
+                failed.append((g, e, str(err)))
+                continue
+            self._installed_stack_triggers.append((g, e))
+            applied.append((g, e))
+        return applied, failed
 
     def remove_event_stacktrace(self):
         """설치한 모든 stacktrace 트리거를 제거한다."""
