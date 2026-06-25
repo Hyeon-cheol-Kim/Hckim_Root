@@ -21,6 +21,11 @@ from typing import Optional
 import pdfplumber
 
 # ── Langflow ──────────────────────────────────────────────────────────────────
+# Component/Data/Message/Input 클래스를 항상 정의한다.
+# Langflow 환경이면 실제 클래스를, 아니면 더미 클래스를 사용한다.
+# 이렇게 해야 컴포넌트 클래스가 모듈 최상위에 위치할 수 있고
+# Langflow의 파일 스캐너가 정상적으로 인식한다.
+
 try:
     from langflow.custom import Component
     from langflow.schema import Data
@@ -53,9 +58,28 @@ try:
         )
         from langflow.template import Output  # type: ignore[no-redef]
 
-    _LF = True
 except ImportError:
-    _LF = False
+    # ── Langflow 없이 단독 실행할 때 사용하는 더미 클래스 ──────────────────
+    class Component:  # type: ignore[no-redef]
+        inputs: list = []
+        outputs: list = []
+
+    class Data:  # type: ignore[no-redef]
+        def __init__(self, data=None, **_):
+            self.data = data or {}
+
+    class Message:  # type: ignore[no-redef]
+        def __init__(self, text="", **_):
+            self.text = text
+
+    def _dummy_input(**_):
+        return None
+
+    BoolInput = DropdownInput = FileInput = FloatInput = _dummy_input
+    IntInput = MessageTextInput = SecretStrInput = StrInput = _dummy_input
+
+    def Output(**_):  # type: ignore[no-redef]
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -566,196 +590,197 @@ def convert_pdf_to_json(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# §7  Langflow 컴포넌트
+# §7  Langflow 컴포넌트  (모듈 최상위 레벨 — if 블록 없음)
+#     Component는 위 import 블록에서 항상 정의되므로 조건문 불필요.
 # ══════════════════════════════════════════════════════════════════════════════
 
-if _LF:
 
-    # ── ① Knowledge Search 컴포넌트 ──────────────────────────────────────────
+# ── ① Knowledge Search 컴포넌트 ──────────────────────────────────────────────
 
-    class PDFKnowledgeSearchComponent(Component):
-        """
-        PDF를 knowledge base처럼 검색합니다.
-        Search Query 입력을 다른 컴포넌트(Chat Input 등)에서 연결하세요.
+class PDFKnowledgeSearchComponent(Component):
+    """
+    PDF를 knowledge base처럼 검색합니다.
+    Search Query 입력을 다른 컴포넌트(Chat Input 등)에서 연결하세요.
 
-        출력 포트
-          • result  : Markdown 텍스트 (Parser / ChatOutput 연결)
-          • figures : 저장된 그림 경로 목록 (Data)
-        """
+    출력 포트
+      • result  : Markdown 텍스트 (Parser / ChatOutput 연결)
+      • figures : 저장된 그림 경로 목록 (Data)
+    """
 
-        display_name = "PDF Knowledge Search"
-        description = (
-            "PDF에서 Search Query와 관련된 본문·표(Table)·그림(Figure)을 "
-            "추출하고 Markdown으로 반환합니다."
+    display_name = "PDF Knowledge Search"
+    description = (
+        "PDF에서 Search Query와 관련된 본문·표(Table)·그림(Figure)을 "
+        "추출하고 Markdown으로 반환합니다."
+    )
+    icon = "search"
+    name = "PDFKnowledgeSearch"
+
+    inputs = [
+        FileInput(
+            name="pdf_file",
+            display_name="PDF 파일",
+            file_types=["pdf"],
+            required=True,
+            info="검색할 PDF 파일을 업로드하세요.",
+        ),
+        MessageTextInput(
+            name="search_query",
+            display_name="Search Query",
+            required=True,
+            info="찾을 내용을 입력하세요. Chat Input 등 다른 컴포넌트와 연결 가능합니다.",
+        ),
+        IntInput(
+            name="top_k",
+            display_name="최대 결과 수 (Top-K)",
+            value=5,
+            info="표·그림·텍스트 각각 최대 몇 건을 반환할지 설정합니다.",
+        ),
+        FloatInput(
+            name="similarity_threshold",
+            display_name="유사도 임계값",
+            value=0.05,
+            info="0~1 사이. 낮을수록 더 많은 결과, 높을수록 정밀 검색.",
+        ),
+        BoolInput(
+            name="search_text",
+            display_name="본문 검색 포함",
+            value=True,
+            info="쿼리와 관련된 본문 텍스트 청크를 함께 반환합니다.",
+        ),
+        BoolInput(
+            name="search_tables",
+            display_name="표(Table) 검색 포함",
+            value=True,
+            info="쿼리와 관련된 표를 Markdown 형식으로 반환합니다.",
+        ),
+        BoolInput(
+            name="search_figures",
+            display_name="그림(Figure) 검색 포함",
+            value=True,
+            info="쿼리와 관련된 그림을 이미지 파일로 저장하고 경로를 반환합니다.",
+        ),
+        StrInput(
+            name="figure_output_dir",
+            display_name="그림 저장 폴더",
+            value="./pdf_figures",
+            info="추출된 그림이 저장될 디렉토리 경로.",
+        ),
+        IntInput(
+            name="figure_dpi",
+            display_name="그림 해상도 (DPI)",
+            value=150,
+            info="저장할 그림의 DPI (72~300 권장).",
+        ),
+        SecretStrInput(
+            name="password",
+            display_name="PDF 비밀번호 (선택)",
+            value="",
+            info="암호화된 PDF인 경우 입력하세요.",
+        ),
+    ]
+
+    outputs = [
+        Output(display_name="Markdown Result", name="result", method="search"),
+        Output(display_name="Figure Paths", name="figures", method="get_figures"),
+    ]
+
+    # 인덱스 캐시 (같은 파일 재파싱 방지)
+    _cached_index: Optional[PDFIndex] = None
+    _cached_path: str = ""
+
+    def _get_index(self) -> PDFIndex:
+        pdf_path = str(self.pdf_file)
+        if self._cached_path != pdf_path:
+            self._cached_index = PDFIndex(pdf_path, self.password or None)
+            self._cached_path = pdf_path
+        return self._cached_index  # type: ignore[return-value]
+
+    def search(self) -> Message:
+        index = self._get_index()
+        query = self.search_query
+
+        text_chunks = (
+            index.search_text_chunks(query, self.top_k, self.similarity_threshold)
+            if self.search_text else []
         )
-        icon = "search"
-        name = "PDFKnowledgeSearch"
+        matched_tables = (
+            index.search_tables(query, self.top_k, self.similarity_threshold)
+            if self.search_tables else []
+        )
+        matched_figures = (
+            index.search_figures(query, self.top_k, self.similarity_threshold)
+            if self.search_figures else []
+        )
 
-        inputs = [
-            FileInput(
-                name="pdf_file",
-                display_name="PDF 파일",
-                file_types=["pdf"],
-                required=True,
-                info="검색할 PDF 파일을 업로드하세요.",
-            ),
-            MessageTextInput(
-                name="search_query",
-                display_name="Search Query",
-                required=True,
-                info="찾을 내용을 입력하세요. Chat Input 등 다른 컴포넌트와 연결 가능합니다.",
-            ),
-            IntInput(
-                name="top_k",
-                display_name="최대 결과 수 (Top-K)",
-                value=5,
-                info="표·그림·텍스트 각각 최대 몇 건을 반환할지 설정합니다.",
-            ),
-            FloatInput(
-                name="similarity_threshold",
-                display_name="유사도 임계값",
-                value=0.05,
-                info="0~1 사이. 낮을수록 더 많은 결과, 높을수록 정밀 검색.",
-            ),
-            BoolInput(
-                name="search_text",
-                display_name="본문 검색 포함",
-                value=True,
-                info="쿼리와 관련된 본문 텍스트 청크를 함께 반환합니다.",
-            ),
-            BoolInput(
-                name="search_tables",
-                display_name="표(Table) 검색 포함",
-                value=True,
-                info="쿼리와 관련된 표를 Markdown 형식으로 반환합니다.",
-            ),
-            BoolInput(
-                name="search_figures",
-                display_name="그림(Figure) 검색 포함",
-                value=True,
-                info="쿼리와 관련된 그림을 이미지 파일로 저장하고 경로를 반환합니다.",
-            ),
-            StrInput(
-                name="figure_output_dir",
-                display_name="그림 저장 폴더",
-                value="./pdf_figures",
-                info="추출된 그림이 저장될 디렉토리 경로.",
-            ),
-            IntInput(
-                name="figure_dpi",
-                display_name="그림 해상도 (DPI)",
-                value=150,
-                info="저장할 그림의 DPI (72~300 권장).",
-            ),
-            SecretStrInput(
-                name="password",
-                display_name="PDF 비밀번호 (선택)",
-                value="",
-                info="암호화된 PDF인 경우 입력하세요.",
-            ),
-        ]
-
-        outputs = [
-            Output(display_name="Markdown Result", name="result", method="search"),
-            Output(display_name="Figure Paths", name="figures", method="get_figures"),
-        ]
-
-        # 인덱스 캐시 (같은 파일 재파싱 방지)
-        _cached_index: Optional[PDFIndex] = None
-        _cached_path: str = ""
-
-        def _get_index(self) -> PDFIndex:
-            pdf_path = str(self.pdf_file)
-            if self._cached_path != pdf_path:
-                self._cached_index = PDFIndex(pdf_path, self.password or None)
-                self._cached_path = pdf_path
-            return self._cached_index  # type: ignore[return-value]
-
-        def search(self) -> Message:
-            index = self._get_index()
-            query = self.search_query
-
-            text_chunks = (
-                index.search_text_chunks(query, self.top_k, self.similarity_threshold)
-                if self.search_text else []
-            )
-            matched_tables = (
-                index.search_tables(query, self.top_k, self.similarity_threshold)
-                if self.search_tables else []
-            )
-            matched_figures = (
-                index.search_figures(query, self.top_k, self.similarity_threshold)
-                if self.search_figures else []
-            )
-
-            # 그림 이미지 저장
-            if self.search_figures:
-                out_dir = Path(self.figure_output_dir)
-                for fig in matched_figures:
-                    saved = save_figure_image(
-                        str(self.pdf_file), fig, out_dir, dpi=int(self.figure_dpi)
-                    )
-                    fig["saved_path"] = saved
-
-            md = format_search_results(
-                query=query,
-                metadata=index.metadata,
-                text_chunks=text_chunks,
-                tables=matched_tables,
-                figures=matched_figures,
-            )
-            return Message(text=md)
-
-        def get_figures(self) -> Data:
-            """저장된 그림 경로 목록을 Data로 반환 (search() 이후 호출)"""
-            index = self._get_index()
-            query = self.search_query
-            matched = (
-                index.search_figures(query, self.top_k, self.similarity_threshold)
-                if self.search_figures else []
-            )
+        # 그림 이미지 저장
+        if self.search_figures:
             out_dir = Path(self.figure_output_dir)
-            paths = []
-            for fig in matched:
+            for fig in matched_figures:
                 saved = save_figure_image(
                     str(self.pdf_file), fig, out_dir, dpi=int(self.figure_dpi)
                 )
-                if saved:
-                    paths.append(saved)
-            return Data(data={"figure_paths": paths, "count": len(paths)})
+                fig["saved_path"] = saved
 
-    # ── ② 전체-JSON 변환 컴포넌트 (기존 유지) ─────────────────────────────
+        md = format_search_results(
+            query=query,
+            metadata=index.metadata,
+            text_chunks=text_chunks,
+            tables=matched_tables,
+            figures=matched_figures,
+        )
+        return Message(text=md)
 
-    class PDFToJsonComponent(Component):
-        """PDF 전체를 구조화된 JSON으로 변환 (후처리·파이프라인용)"""
-
-        display_name = "PDF to JSON (Full)"
-        description = "PDF의 모든 페이지에서 텍스트·표·이미지를 추출하여 JSON Data로 반환합니다."
-        icon = "file-text"
-        name = "PDFToJsonConverter"
-
-        inputs = [
-            FileInput(name="pdf_file", display_name="PDF 파일",
-                      file_types=["pdf"], required=True),
-            BoolInput(name="extract_images", display_name="이미지 메타데이터 추출", value=True),
-            BoolInput(name="extract_word_positions", display_name="단어 위치 포함", value=False),
-            DropdownInput(name="output_format", display_name="출력 형식",
-                          options=["Data (구조화)", "JSON 문자열"], value="Data (구조화)"),
-            SecretStrInput(name="password", display_name="PDF 비밀번호 (선택)", value=""),
-        ]
-
-        outputs = [Output(display_name="JSON Data", name="json_data", method="convert")]
-
-        def convert(self) -> Data:
-            result = convert_pdf_to_json(
-                pdf_path=self.pdf_file,
-                extract_images=self.extract_images,
-                extract_word_positions=self.extract_word_positions,
-                password=self.password or None,
+    def get_figures(self) -> Data:
+        """저장된 그림 경로 목록을 Data로 반환 (search() 이후 호출)"""
+        index = self._get_index()
+        query = self.search_query
+        matched = (
+            index.search_figures(query, self.top_k, self.similarity_threshold)
+            if self.search_figures else []
+        )
+        out_dir = Path(self.figure_output_dir)
+        paths = []
+        for fig in matched:
+            saved = save_figure_image(
+                str(self.pdf_file), fig, out_dir, dpi=int(self.figure_dpi)
             )
-            if self.output_format == "JSON 문자열":
-                return Data(data={"json_string": json.dumps(result, ensure_ascii=False, indent=2)})
-            return Data(data=result)
+            if saved:
+                paths.append(saved)
+        return Data(data={"figure_paths": paths, "count": len(paths)})
+
+
+# ── ② 전체-JSON 변환 컴포넌트 ────────────────────────────────────────────────
+
+class PDFToJsonComponent(Component):
+    """PDF 전체를 구조화된 JSON으로 변환 (후처리·파이프라인용)"""
+
+    display_name = "PDF to JSON (Full)"
+    description = "PDF의 모든 페이지에서 텍스트·표·이미지를 추출하여 JSON Data로 반환합니다."
+    icon = "file-text"
+    name = "PDFToJsonConverter"
+
+    inputs = [
+        FileInput(name="pdf_file", display_name="PDF 파일",
+                  file_types=["pdf"], required=True),
+        BoolInput(name="extract_images", display_name="이미지 메타데이터 추출", value=True),
+        BoolInput(name="extract_word_positions", display_name="단어 위치 포함", value=False),
+        DropdownInput(name="output_format", display_name="출력 형식",
+                      options=["Data (구조화)", "JSON 문자열"], value="Data (구조화)"),
+        SecretStrInput(name="password", display_name="PDF 비밀번호 (선택)", value=""),
+    ]
+
+    outputs = [Output(display_name="JSON Data", name="json_data", method="convert")]
+
+    def convert(self) -> Data:
+        result = convert_pdf_to_json(
+            pdf_path=self.pdf_file,
+            extract_images=self.extract_images,
+            extract_word_positions=self.extract_word_positions,
+            password=self.password or None,
+        )
+        if self.output_format == "JSON 문자열":
+            return Data(data={"json_string": json.dumps(result, ensure_ascii=False, indent=2)})
+        return Data(data=result)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
