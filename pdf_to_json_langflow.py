@@ -20,33 +20,70 @@ from typing import Optional
 
 import pdfplumber
 
-# ── Langflow ──────────────────────────────────────────────────────────────────
-# Component/Data/Message/Input 클래스를 항상 정의한다.
-# Langflow 환경이면 실제 클래스를, 아니면 더미 클래스를 사용한다.
-# 이렇게 해야 컴포넌트 클래스가 모듈 최상위에 위치할 수 있고
-# Langflow의 파일 스캐너가 정상적으로 인식한다.
+# ── Langflow 기반 클래스 / 입출력 타입 ───────────────────────────────────────
+#
+# 전략: 더미(fallback) 클래스를 먼저 정의한 뒤 실제 Langflow 클래스로 덮어쓴다.
+# 이렇게 하면 import 실패 시 예외 종류에 무관하게 Component가 항상 정의된 상태이므로
+# NameError가 발생하지 않는다.
+
+
+# ── Step 1: 더미 정의 (단독 실행 또는 import 실패 시 사용) ───────────────────
+
+class Component:  # noqa: E302
+    """Langflow Component 더미 — Langflow가 없을 때 상속 대상으로만 사용"""
+    inputs: list = []
+    outputs: list = []
+
+
+class Data:  # noqa: E302
+    def __init__(self, data=None, **_):
+        self.data = data or {}
+
+
+class Message:  # noqa: E302
+    def __init__(self, text="", **_):
+        self.text = text
+
+
+def _noop(**_):
+    return None
+
+
+BoolInput = DropdownInput = FileInput = FloatInput = _noop
+IntInput = MessageTextInput = SecretStrInput = StrInput = _noop
+Output = _noop
+
+
+# ── Step 2: 실제 Langflow 클래스로 덮어쓰기 (예외가 나도 Step 1 정의가 유지됨) ──
 
 try:
-    from langflow.custom import Component
-    from langflow.schema import Data
-    from langflow.schema.message import Message
+    from langflow.custom import Component  # type: ignore[no-redef]  # noqa: F811
+except Exception:
+    pass
 
+try:
+    from langflow.schema import Data  # type: ignore[no-redef]  # noqa: F811
+    from langflow.schema.message import Message  # type: ignore[no-redef]  # noqa: F811
+except Exception:
+    pass
+
+try:
+    # Langflow 1.x+ 신버전 — langflow.io
+    from langflow.io import (  # type: ignore[no-redef]  # noqa: F811
+        BoolInput,
+        DropdownInput,
+        FileInput,
+        FloatInput,
+        IntInput,
+        MessageTextInput,
+        SecretStrInput,
+        StrInput,
+        Output,
+    )
+except Exception:
     try:
-        # Langflow 1.x+ 신버전
-        from langflow.io import (
-            BoolInput,
-            DropdownInput,
-            FileInput,
-            FloatInput,
-            IntInput,
-            MessageTextInput,
-            SecretStrInput,
-            StrInput,
-            Output,
-        )
-    except ImportError:
-        # 구버전 폴백
-        from langflow.inputs import (  # type: ignore[no-redef]
+        # 구버전 폴백 — langflow.inputs / langflow.template
+        from langflow.inputs import (  # type: ignore[no-redef]  # noqa: F811
             BoolInput,
             DropdownInput,
             FileInput,
@@ -56,30 +93,9 @@ try:
             SecretStrInput,
             StrInput,
         )
-        from langflow.template import Output  # type: ignore[no-redef]
-
-except ImportError:
-    # ── Langflow 없이 단독 실행할 때 사용하는 더미 클래스 ──────────────────
-    class Component:  # type: ignore[no-redef]
-        inputs: list = []
-        outputs: list = []
-
-    class Data:  # type: ignore[no-redef]
-        def __init__(self, data=None, **_):
-            self.data = data or {}
-
-    class Message:  # type: ignore[no-redef]
-        def __init__(self, text="", **_):
-            self.text = text
-
-    def _dummy_input(**_):
-        return None
-
-    BoolInput = DropdownInput = FileInput = FloatInput = _dummy_input
-    IntInput = MessageTextInput = SecretStrInput = StrInput = _dummy_input
-
-    def Output(**_):  # type: ignore[no-redef]
-        return None
+        from langflow.template import Output  # type: ignore[no-redef]  # noqa: F811
+    except Exception:
+        pass  # 모두 실패 시 Step 1 더미 유지
 
 
 # ══════════════════════════════════════════════════════════════════════════════
