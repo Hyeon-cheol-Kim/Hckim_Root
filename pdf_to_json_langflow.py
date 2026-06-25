@@ -1,8 +1,8 @@
 """
-Langflow Custom Component: PDF Knowledge Search
+Langflow Component: PDF Knowledge Search
 PDF를 knowledge base처럼 검색 — 쿼리와 관련된 표·그림을 추출하여 반환.
 
-컴포넌트
+컴포넌트 (langflow.custom.Component 기반, Langflow 1.x+ 호환)
   ① PDFKnowledgeSearchComponent  ← 메인 (Search Query 연결)
   ② PDFToJsonComponent           ← 기존 전체-JSON 변환 (후처리용)
 """
@@ -22,20 +22,36 @@ import pdfplumber
 
 # ── Langflow ──────────────────────────────────────────────────────────────────
 try:
-    from langflow.custom import CustomComponent
+    from langflow.custom import Component
     from langflow.schema import Data
     from langflow.schema.message import Message
-    from langflow.inputs import (
-        BoolInput,
-        DropdownInput,
-        FileInput,
-        FloatInput,
-        IntInput,
-        MessageTextInput,
-        SecretStrInput,
-        StrInput,
-    )
-    from langflow.template import Output
+
+    try:
+        # Langflow 1.x+ 신버전
+        from langflow.io import (
+            BoolInput,
+            DropdownInput,
+            FileInput,
+            FloatInput,
+            IntInput,
+            MessageTextInput,
+            SecretStrInput,
+            StrInput,
+            Output,
+        )
+    except ImportError:
+        # 구버전 폴백
+        from langflow.inputs import (  # type: ignore[no-redef]
+            BoolInput,
+            DropdownInput,
+            FileInput,
+            FloatInput,
+            IntInput,
+            MessageTextInput,
+            SecretStrInput,
+            StrInput,
+        )
+        from langflow.template import Output  # type: ignore[no-redef]
 
     _LF = True
 except ImportError:
@@ -557,7 +573,7 @@ if _LF:
 
     # ── ① Knowledge Search 컴포넌트 ──────────────────────────────────────────
 
-    class PDFKnowledgeSearchComponent(CustomComponent):
+    class PDFKnowledgeSearchComponent(Component):
         """
         PDF를 knowledge base처럼 검색합니다.
         Search Query 입력을 다른 컴포넌트(Chat Input 등)에서 연결하세요.
@@ -710,7 +726,7 @@ if _LF:
 
     # ── ② 전체-JSON 변환 컴포넌트 (기존 유지) ─────────────────────────────
 
-    class PDFToJsonComponent(CustomComponent):
+    class PDFToJsonComponent(Component):
         """PDF 전체를 구조화된 JSON으로 변환 (후처리·파이프라인용)"""
 
         display_name = "PDF to JSON (Full)"
