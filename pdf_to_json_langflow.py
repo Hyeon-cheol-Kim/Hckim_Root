@@ -129,14 +129,46 @@ def _render_region_png(
         return False
 
 
-def _image_to_base64_uri(path: str) -> Optional[str]:
-    """PNG 파일 → Chat Output 인라인 표시용 base64 data URI"""
+def _render_inline_img_html(
+    pdf_path: str,
+    page_num: int,
+    bbox: tuple,
+    dpi: int = 96,
+    jpeg_quality: int = 75,
+) -> Optional[str]:
+    """Chat Output 인라인 표시용 HTML <img> 태그 반환.
+    JPEG으로 압축하여 PNG보다 크기를 대폭 줄임.
+    Langflow Chat Output은 rehype-raw로 HTML 태그를 지원하므로
+    data: URI를 <img> 태그로 삽입하면 정상 렌더링됨."""
     try:
-        with open(path, "rb") as f:
-            data = base64.b64encode(f.read()).decode("utf-8")
-        return f"data:image/png;base64,{data}"
+        import fitz
+    except ImportError:
+        return None
+    try:
+        doc = fitz.open(str(pdf_path))
+        page = doc[page_num - 1]
+        pw, ph = page.rect.width, page.rect.height
+        x0, y0, x1, y1 = bbox
+        padding = 4
+        clip = fitz.Rect(
+            max(0.0, x0 - padding), max(0.0, y0 - padding),
+            min(pw, x1 + padding), min(ph, y1 + padding),
+        )
+        if clip.is_empty or clip.get_area() < 1:
+            doc.close()
+            return None
+        mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+        pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
+        jpeg_bytes = pix.tobytes("jpeg", jpg_quality=jpeg_quality)
+        doc.close()
+        b64 = base64.b64encode(jpeg_bytes).decode()
+        return (
+            f'<img src="data:image/jpeg;base64,{b64}" '
+            f'style="max-width:100%;display:block;margin:6px 0;'
+            f'border:1px solid #ddd;border-radius:4px"/>'
+        )
     except Exception as e:
-        print(f"  [Base64] 변환 실패: {e}")
+        print(f"  [InlineImg] JPEG 렌더링 실패: {e}")
         return None
 
 
@@ -323,8 +355,9 @@ def _extract_table_elements(
             _nearby_text(page_text, " ".join(headers), 300),
         ])
 
-        # 이미지 저장
+        # PNG 파일 저장 (외부 활용) + JPEG 인라인 HTML 생성 (Chat Output 표시용)
         img_path = None
+        inline_html = None
         if bbox:
             out_path = output_dir / f"page{page.page_number}_table{t_idx}.png"
             print(f"  [Table] Page {page.page_number} / 표{t_idx} 렌더링 → {out_path.name}")
@@ -333,6 +366,7 @@ def _extract_table_elements(
                 print(f"  [Table] 저장 완료: {out_path.name}")
             else:
                 print(f"  [Table] 이미지 저장 실패")
+            inline_html = _render_inline_img_html(pdf_path, page.page_number, bbox)
 
         elements.append({
             "type": "table",
@@ -343,6 +377,7 @@ def _extract_table_elements(
             "rows": rows,
             "text_content": cell_text,
             "image_path": img_path,
+            "inline_html": inline_html,
             "score": 0.0,
         })
 
@@ -382,7 +417,7 @@ def _extract_figure_elements(
         context = _nearby_text(page_text, anchor, 400)
         text_content = " ".join(filter(None, [caption, inner_text, context]))
 
-        # 이미지 저장
+        # PNG 파일 저장 (외부 활용) + JPEG 인라인 HTML 생성 (Chat Output 표시용)
         img_path = None
         out_path = output_dir / f"page{page.page_number}_fig{f_idx}.png"
         print(f"  [Figure] Page {page.page_number} / 그림{f_idx} 렌더링 → {out_path.name}")
@@ -391,6 +426,7 @@ def _extract_figure_elements(
             print(f"  [Figure] 저장 완료: {out_path.name}")
         else:
             print(f"  [Figure] 이미지 저장 실패")
+        inline_html = _render_inline_img_html(pdf_path, page.page_number, bbox)
 
         elements.append({
             "type": "figure",
@@ -401,6 +437,7 @@ def _extract_figure_elements(
             "inner_text": inner_text,
             "text_content": text_content,
             "image_path": img_path,
+            "inline_html": inline_html,
             "score": 0.0,
         })
 
@@ -568,11 +605,11 @@ def format_search_results(
     text_chunks: list[dict],
     tables: list[dict],
     figures: list[dict],
-) -> tuple[str, list[str]]:
-    """검색 결과를 Markdown으로 직렬화. (markdown_text, image_paths) 반환.
-    이미지는 Message(files=[...])로 전달하므로 Markdown에는 경로 참조만 표시."""
+) -> str:
+    """검색 결과를 Markdown+HTML 혼합 문자열로 직렬화.
+    이미지는 <img src="data:image/jpeg;base64,..."/> HTML 태그로 삽입.
+    Langflow Chat Output은 rehype-raw를 통해 HTML 태그를 직접 렌더링함."""
     lines: list[str] = []
-    image_paths: list[str] = []
 
     lines += [
         "# PDF Knowledge Search", "",
@@ -599,9 +636,11 @@ def format_search_results(
             lines += [
                 f"### Table {i}  —  Page {tbl['page_number']}  (관련도 {int(tbl['score']*100)}%)", "",
             ]
-            if tbl.get("image_path"):
+            # 표 이미지: HTML <img> 태그 (JPEG base64 인라인)
+            if tbl.get("inline_html"):
+                lines += [tbl["inline_html"], ""]
+            elif tbl.get("image_path"):
                 lines += [f"📎 `{tbl['image_path']}`", ""]
-                image_paths.append(tbl["image_path"])
             # 표 텍스트 (Markdown 표)
             lines += [table_to_markdown(tbl), ""]
 
@@ -614,16 +653,18 @@ def format_search_results(
             ]
             if fig.get("caption"):
                 lines += [f"**캡션**: {fig['caption']}", ""]
-            if fig.get("image_path"):
+            # 그림 이미지: HTML <img> 태그 (JPEG base64 인라인)
+            if fig.get("inline_html"):
+                lines += [fig["inline_html"], ""]
+            elif fig.get("image_path"):
                 lines += [f"📎 `{fig['image_path']}`", ""]
-                image_paths.append(fig["image_path"])
             else:
                 lines += ["*(이미지 없음 — PyMuPDF 설치 필요: pip install pymupdf)*", ""]
 
     if not (text_chunks or tables or figures):
         lines += ["", "> 검색 결과 없음. 쿼리를 바꾸거나 유사도 임계값을 낮춰보세요.", ""]
 
-    return "\n".join(lines), image_paths
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -817,7 +858,7 @@ class PDFKnowledgeSearchComponent(Component):
             print(f"[Component] [3/3] 그림 검색 생략")
 
         print(f"[Component] 결과 Markdown 생성 중...")
-        md, image_paths = format_search_results(
+        md = format_search_results(
             query=query,
             metadata=index.metadata,
             text_chunks=text_chunks,
@@ -826,12 +867,9 @@ class PDFKnowledgeSearchComponent(Component):
         )
         print(
             f"[Component] === 완료 — "
-            f"본문 {len(text_chunks)}건 / 표 {len(matched_tables)}건 / 그림 {len(matched_figures)}건 "
-            f"/ 이미지 첨부 {len(image_paths)}개 ==="
+            f"본문 {len(text_chunks)}건 / 표 {len(matched_tables)}건 / 그림 {len(matched_figures)}건 ==="
         )
-        # 이미지는 files=[] 로 전달 → Chat Output이 직접 렌더링
-        # (base64 data URI를 Markdown에 인라인 삽입하면 깨짐)
-        return Message(text=md, files=image_paths)
+        return Message(text=md)
 
     def get_element_paths(self) -> Data:
         """저장된 표·그림 이미지 경로 전체 목록 반환"""
