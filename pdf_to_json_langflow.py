@@ -313,6 +313,17 @@ def save_figure_image(
     return None
 
 
+def image_to_base64_uri(path: str) -> Optional[str]:
+    """저장된 PNG 파일을 Chat Output 인라인 표시용 base64 data URI로 변환"""
+    try:
+        with open(path, "rb") as f:
+            data = base64.b64encode(f.read()).decode("utf-8")
+        return f"data:image/png;base64,{data}"
+    except Exception as e:
+        print(f"  [Figure] base64 변환 실패: {e}")
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # §4  전체 PDF 로딩 및 검색 엔진
 # ══════════════════════════════════════════════════════════════════════════════
@@ -491,7 +502,13 @@ def format_search_results(
             if fig.get("context"):
                 lines += [f"*{fig['context'][:120].strip()}*", ""]
             if saved:
-                lines += [f"**저장 경로**: `{saved}`", f"", f"![Figure {i}]({saved})", ""]
+                lines += [f"**저장 경로**: `{saved}`", ""]
+                b64 = fig.get("base64_uri")
+                if b64:
+                    # Chat Output에서 인라인 이미지로 표시
+                    lines += [f"![Figure {i}]({b64})", ""]
+                else:
+                    lines += [f"![Figure {i}]({saved})", ""]
             else:
                 lines += [f"*(이미지 저장 실패 — PyMuPDF 또는 pdf2image 설치 권장)*", ""]
 
@@ -713,6 +730,10 @@ class PDFKnowledgeSearchComponent(Component):
                         str(self.pdf_file), fig, out_dir, dpi=int(self.figure_dpi)
                     )
                     fig["saved_path"] = saved
+                    if saved:
+                        print(f"  [Figure] base64 인코딩 중: {Path(saved).name}")
+                        fig["base64_uri"] = image_to_base64_uri(saved)
+                        print(f"  [Figure] base64 인코딩 완료 → Chat Output 인라인 표시 가능")
             else:
                 print(f"[Component] [3/3] 관련 그림 없음")
         else:
