@@ -16,13 +16,76 @@ PDF를 knowledge base처럼 검색 — 쿼리와 관련된 표·그림을 추출
 from __future__ import annotations
 
 import base64
+import http.server
 import io
 import json
 import re
+import socket as _socket
+import socketserver
+import threading
 from pathlib import Path
 from typing import Optional
 
 import pdfplumber
+
+# ── 이미지 파일 서버 (Chat Output에서 HTTP URL로 이미지 표시) ─────────────────
+_img_server_lock = threading.Lock()
+_img_server: Optional[socketserver.TCPServer] = None
+_img_server_port: int = 0
+_img_server_dir: str = ""
+
+
+def _start_image_server(directory: str, port: int = 8765) -> str:
+    """
+    이미지 디렉토리를 서빙하는 로컬 HTTP 서버를 시작하고 base URL을 반환.
+    이미 같은 디렉토리로 실행 중이면 재사용.
+    반환값: 'http://localhost:{port}' (Chat Output Markdown 이미지 URL 용)
+
+    주의: Langflow와 브라우저가 같은 머신에 있을 때만 동작.
+          Docker / 원격 서버 환경에서는 이미지 대신 파일 경로가 표시됨.
+    """
+    global _img_server, _img_server_port, _img_server_dir
+
+    directory = str(Path(directory).resolve())
+
+    with _img_server_lock:
+        if _img_server is not None and _img_server_dir == directory:
+            return f"http://localhost:{_img_server_port}"
+
+        # 사용 가능한 포트 탐색 (지정 포트 ~ +50)
+        actual_port = port
+        for p in range(port, port + 50):
+            try:
+                with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                    s.bind(("", p))
+                actual_port = p
+                break
+            except OSError:
+                continue
+
+        class _Handler(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=directory, **kwargs)
+
+            def log_message(self, fmt, *args):
+                pass  # 액세스 로그 억제
+
+        httpd = socketserver.TCPServer(
+            ("", actual_port), _Handler, bind_and_activate=False
+        )
+        httpd.allow_reuse_address = True
+        httpd.server_bind()
+        httpd.server_activate()
+
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+
+        _img_server = httpd
+        _img_server_port = actual_port
+        _img_server_dir = directory
+
+        print(f"[ImageServer] 이미지 서버 시작: http://localhost:{actual_port}  ← {directory}")
+        return f"http://localhost:{actual_port}"
 
 # ── Langflow imports ──────────────────────────────────────────────────────────
 from langflow.custom import Component
@@ -129,47 +192,6 @@ def _render_region_png(
         return False
 
 
-def _render_inline_img_html(
-    pdf_path: str,
-    page_num: int,
-    bbox: tuple,
-    dpi: int = 96,
-    jpeg_quality: int = 75,
-) -> Optional[str]:
-    """Chat Output 인라인 표시용 HTML <img> 태그 반환.
-    JPEG으로 압축하여 PNG보다 크기를 대폭 줄임.
-    Langflow Chat Output은 rehype-raw로 HTML 태그를 지원하므로
-    data: URI를 <img> 태그로 삽입하면 정상 렌더링됨."""
-    try:
-        import fitz
-    except ImportError:
-        return None
-    try:
-        doc = fitz.open(str(pdf_path))
-        page = doc[page_num - 1]
-        pw, ph = page.rect.width, page.rect.height
-        x0, y0, x1, y1 = bbox
-        padding = 4
-        clip = fitz.Rect(
-            max(0.0, x0 - padding), max(0.0, y0 - padding),
-            min(pw, x1 + padding), min(ph, y1 + padding),
-        )
-        if clip.is_empty or clip.get_area() < 1:
-            doc.close()
-            return None
-        mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-        pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
-        jpeg_bytes = pix.tobytes("jpeg", jpg_quality=jpeg_quality)
-        doc.close()
-        b64 = base64.b64encode(jpeg_bytes).decode()
-        return (
-            f'<img src="data:image/jpeg;base64,{b64}" '
-            f'style="max-width:100%;display:block;margin:6px 0;'
-            f'border:1px solid #ddd;border-radius:4px"/>'
-        )
-    except Exception as e:
-        print(f"  [InlineImg] JPEG 렌더링 실패: {e}")
-        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -355,9 +377,8 @@ def _extract_table_elements(
             _nearby_text(page_text, " ".join(headers), 300),
         ])
 
-        # PNG 파일 저장 (외부 활용) + JPEG 인라인 HTML 생성 (Chat Output 표시용)
+        # PNG 파일 저장 (외부 활용 + HTTP 서버로 Chat Output 표시)
         img_path = None
-        inline_html = None
         if bbox:
             out_path = output_dir / f"page{page.page_number}_table{t_idx}.png"
             print(f"  [Table] Page {page.page_number} / 표{t_idx} 렌더링 → {out_path.name}")
@@ -366,7 +387,6 @@ def _extract_table_elements(
                 print(f"  [Table] 저장 완료: {out_path.name}")
             else:
                 print(f"  [Table] 이미지 저장 실패")
-            inline_html = _render_inline_img_html(pdf_path, page.page_number, bbox)
 
         elements.append({
             "type": "table",
@@ -377,7 +397,6 @@ def _extract_table_elements(
             "rows": rows,
             "text_content": cell_text,
             "image_path": img_path,
-            "inline_html": inline_html,
             "score": 0.0,
         })
 
@@ -417,7 +436,7 @@ def _extract_figure_elements(
         context = _nearby_text(page_text, anchor, 400)
         text_content = " ".join(filter(None, [caption, inner_text, context]))
 
-        # PNG 파일 저장 (외부 활용) + JPEG 인라인 HTML 생성 (Chat Output 표시용)
+        # PNG 파일 저장 (외부 활용 + HTTP 서버로 Chat Output 표시)
         img_path = None
         out_path = output_dir / f"page{page.page_number}_fig{f_idx}.png"
         print(f"  [Figure] Page {page.page_number} / 그림{f_idx} 렌더링 → {out_path.name}")
@@ -426,7 +445,6 @@ def _extract_figure_elements(
             print(f"  [Figure] 저장 완료: {out_path.name}")
         else:
             print(f"  [Figure] 이미지 저장 실패")
-        inline_html = _render_inline_img_html(pdf_path, page.page_number, bbox)
 
         elements.append({
             "type": "figure",
@@ -437,7 +455,6 @@ def _extract_figure_elements(
             "inner_text": inner_text,
             "text_content": text_content,
             "image_path": img_path,
-            "inline_html": inline_html,
             "score": 0.0,
         })
 
@@ -605,10 +622,14 @@ def format_search_results(
     text_chunks: list[dict],
     tables: list[dict],
     figures: list[dict],
+    server_url: Optional[str] = None,
 ) -> str:
-    """검색 결과를 Markdown+HTML 혼합 문자열로 직렬화.
-    이미지는 <img src="data:image/jpeg;base64,..."/> HTML 태그로 삽입.
-    Langflow Chat Output은 rehype-raw를 통해 HTML 태그를 직접 렌더링함."""
+    """검색 결과를 Markdown으로 직렬화.
+    server_url이 있으면 HTTP URL로 이미지를 표시 (가장 안정적).
+    server_url이 없으면 파일 경로 텍스트로 표시.
+
+    Langflow Chat Output은 data: URI와 HTML img 태그를 모두 차단하므로
+    로컬 HTTP 서버를 통한 실제 URL만이 이미지를 정상 표시함."""
     lines: list[str] = []
 
     lines += [
@@ -616,8 +637,11 @@ def format_search_results(
         f"**검색어**: `{query}`  ",
         f"**파일**: {metadata.get('file_name', '')}  ",
         f"**총 페이지**: {metadata.get('total_pages', '')}",
-        "",
     ]
+    if server_url:
+        lines += [f"**이미지 서버**: {server_url}", ""]
+    else:
+        lines += [""]
 
     # ── 관련 본문 ─────────────────────────────────────────────────────────────
     if text_chunks:
@@ -636,11 +660,13 @@ def format_search_results(
             lines += [
                 f"### Table {i}  —  Page {tbl['page_number']}  (관련도 {int(tbl['score']*100)}%)", "",
             ]
-            # 표 이미지: HTML <img> 태그 (JPEG base64 인라인)
-            if tbl.get("inline_html"):
-                lines += [tbl["inline_html"], ""]
-            elif tbl.get("image_path"):
-                lines += [f"📎 `{tbl['image_path']}`", ""]
+            img_path = tbl.get("image_path")
+            if img_path and server_url:
+                # HTTP URL → Markdown 이미지 (브라우저가 정상 렌더링)
+                url = f"{server_url}/{Path(img_path).name}"
+                lines += [f"![Table {i}]({url})", ""]
+            elif img_path:
+                lines += [f"📎 `{img_path}`", ""]
             # 표 텍스트 (Markdown 표)
             lines += [table_to_markdown(tbl), ""]
 
@@ -653,13 +679,15 @@ def format_search_results(
             ]
             if fig.get("caption"):
                 lines += [f"**캡션**: {fig['caption']}", ""]
-            # 그림 이미지: HTML <img> 태그 (JPEG base64 인라인)
-            if fig.get("inline_html"):
-                lines += [fig["inline_html"], ""]
-            elif fig.get("image_path"):
-                lines += [f"📎 `{fig['image_path']}`", ""]
+            img_path = fig.get("image_path")
+            if img_path and server_url:
+                # HTTP URL → Markdown 이미지 (브라우저가 정상 렌더링)
+                url = f"{server_url}/{Path(img_path).name}"
+                lines += [f"![Figure {i}]({url})", ""]
+            elif img_path:
+                lines += [f"📎 `{img_path}`", ""]
             else:
-                lines += ["*(이미지 없음 — PyMuPDF 설치 필요: pip install pymupdf)*", ""]
+                lines += ["*(이미지 없음 — pip install pymupdf 후 재시도)*", ""]
 
     if not (text_chunks or tables or figures):
         lines += ["", "> 검색 결과 없음. 쿼리를 바꾸거나 유사도 임계값을 낮춰보세요.", ""]
@@ -795,6 +823,14 @@ class PDFKnowledgeSearchComponent(Component):
             name="element_dpi", display_name="이미지 해상도 (DPI)", value=150,
             info="저장 PNG의 DPI (72~300).",
         ),
+        IntInput(
+            name="image_server_port", display_name="이미지 서버 포트", value=8765,
+            info=(
+                "Chat Output에서 이미지를 표시하기 위한 로컬 HTTP 서버 포트. "
+                "Langflow와 브라우저가 같은 PC에 있을 때 동작. "
+                "0으로 설정하면 비활성화 (파일 경로만 표시)."
+            ),
+        ),
         SecretStrInput(
             name="password", display_name="PDF 비밀번호 (선택)", value="",
         ),
@@ -857,6 +893,17 @@ class PDFKnowledgeSearchComponent(Component):
         else:
             print(f"[Component] [3/3] 그림 검색 생략")
 
+        # 이미지 HTTP 서버 시작 (로컬 환경에서만 동작)
+        server_url = None
+        port = int(self.image_server_port)
+        if port > 0:
+            output_dir = str(Path(self.element_output_dir).resolve())
+            print(f"[Component] 이미지 서버 시작 시도: port={port}, dir={output_dir}")
+            server_url = _start_image_server(output_dir, port)
+            print(f"[Component] 이미지 서버 URL: {server_url}")
+        else:
+            print(f"[Component] 이미지 서버 비활성화 (port=0)")
+
         print(f"[Component] 결과 Markdown 생성 중...")
         md = format_search_results(
             query=query,
@@ -864,6 +911,7 @@ class PDFKnowledgeSearchComponent(Component):
             text_chunks=text_chunks,
             tables=matched_tables,
             figures=matched_figures,
+            server_url=server_url,
         )
         print(
             f"[Component] === 완료 — "
