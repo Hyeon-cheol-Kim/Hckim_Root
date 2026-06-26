@@ -129,6 +129,17 @@ def _render_region_png(
         return False
 
 
+def _png_to_base64(path: str) -> Optional[str]:
+    """저장된 PNG 파일을 읽어 base64 문자열로 변환. 실패 시 None 반환."""
+    try:
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        print(f"  [Base64] {Path(path).name} → {len(b64)} chars")
+        print(f"  [Base64] 미리보기: {b64[:80]}...")
+        return b64
+    except Exception as e:
+        print(f"  [Base64] 변환 실패: {e}")
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -314,14 +325,16 @@ def _extract_table_elements(
             _nearby_text(page_text, " ".join(headers), 300),
         ])
 
-        # PNG 파일 저장 (외부 활용 + HTTP 서버로 Chat Output 표시)
+        # PNG 저장 후 base64 변환 (Chat Output img 태그용)
         img_path = None
+        base64_str = None
         if bbox:
             out_path = output_dir / f"page{page.page_number}_table{t_idx}.png"
             print(f"  [Table] Page {page.page_number} / 표{t_idx} 렌더링 → {out_path.name}")
             if _render_region_png(pdf_path, page.page_number, bbox, out_path, dpi):
                 img_path = str(out_path)
                 print(f"  [Table] 저장 완료: {out_path.name}")
+                base64_str = _png_to_base64(img_path)
             else:
                 print(f"  [Table] 이미지 저장 실패")
 
@@ -334,6 +347,7 @@ def _extract_table_elements(
             "rows": rows,
             "text_content": cell_text,
             "image_path": img_path,
+            "base64_str": base64_str,
             "score": 0.0,
         })
 
@@ -373,13 +387,15 @@ def _extract_figure_elements(
         context = _nearby_text(page_text, anchor, 400)
         text_content = " ".join(filter(None, [caption, inner_text, context]))
 
-        # PNG 파일 저장 (외부 활용 + HTTP 서버로 Chat Output 표시)
+        # PNG 저장 후 base64 변환 (Chat Output img 태그용)
         img_path = None
+        base64_str = None
         out_path = output_dir / f"page{page.page_number}_fig{f_idx}.png"
         print(f"  [Figure] Page {page.page_number} / 그림{f_idx} 렌더링 → {out_path.name}")
         if _render_region_png(pdf_path, page.page_number, bbox, out_path, dpi):
             img_path = str(out_path)
             print(f"  [Figure] 저장 완료: {out_path.name}")
+            base64_str = _png_to_base64(img_path)
         else:
             print(f"  [Figure] 이미지 저장 실패")
 
@@ -392,6 +408,7 @@ def _extract_figure_elements(
             "inner_text": inner_text,
             "text_content": text_content,
             "image_path": img_path,
+            "base64_str": base64_str,
             "score": 0.0,
         })
 
@@ -561,8 +578,7 @@ def format_search_results(
     figures: list[dict],
 ) -> str:
     """검색 결과를 Markdown으로 직렬화.
-    이미지는 저장 경로를 텍스트로 표시.
-    (Langflow Chat Output은 data URI / HTML img / 로컬 파일 경로 URL을 모두 렌더링하지 않음)"""
+    이미지는 <img src="data:image/png;base64,{base64_str}" /> 형태로 포함."""
     lines: list[str] = []
 
     lines += [
@@ -590,7 +606,10 @@ def format_search_results(
             lines += [
                 f"### Page {tbl['page_number']}  (관련도 {int(tbl['score']*100)}%)", "",
             ]
-            if tbl.get("image_path"):
+            b64 = tbl.get("base64_str")
+            if b64:
+                lines += [f'<img src="data:image/png;base64,{b64}" />', ""]
+            elif tbl.get("image_path"):
                 lines += [f"🖼 `{tbl['image_path']}`", ""]
             lines += [table_to_markdown(tbl), ""]
 
@@ -605,7 +624,10 @@ def format_search_results(
                 lines += [f"**캡션**: {fig['caption']}", ""]
             if fig.get("inner_text"):
                 lines += [f"**내용**: {fig['inner_text'][:200]}", ""]
-            if fig.get("image_path"):
+            b64 = fig.get("base64_str")
+            if b64:
+                lines += [f'<img src="data:image/png;base64,{b64}" />', ""]
+            elif fig.get("image_path"):
                 lines += [f"🖼 `{fig['image_path']}`", ""]
 
     if not (text_chunks or tables or figures):
@@ -652,7 +674,7 @@ def convert_pdf_to_json(
             tbl_elems = [e for e in index.elements
                          if e["type"] == "table" and e["page_number"] == pn]
             tables_data = [{k: v for k, v in e.items()
-                            if k not in ("score", "base64_uri", "text_content")}
+                            if k not in ("score", "base64_str", "text_content")}
                            for e in tbl_elems]
 
             words = []
