@@ -325,13 +325,11 @@ def _extract_table_elements(
 
         # 이미지 저장
         img_path = None
-        b64 = None
         if bbox:
             out_path = output_dir / f"page{page.page_number}_table{t_idx}.png"
             print(f"  [Table] Page {page.page_number} / 표{t_idx} 렌더링 → {out_path.name}")
             if _render_region_png(pdf_path, page.page_number, bbox, out_path, dpi):
                 img_path = str(out_path)
-                b64 = _image_to_base64_uri(img_path)
                 print(f"  [Table] 저장 완료: {out_path.name}")
             else:
                 print(f"  [Table] 이미지 저장 실패")
@@ -345,7 +343,6 @@ def _extract_table_elements(
             "rows": rows,
             "text_content": cell_text,
             "image_path": img_path,
-            "base64_uri": b64,
             "score": 0.0,
         })
 
@@ -387,12 +384,10 @@ def _extract_figure_elements(
 
         # 이미지 저장
         img_path = None
-        b64 = None
         out_path = output_dir / f"page{page.page_number}_fig{f_idx}.png"
         print(f"  [Figure] Page {page.page_number} / 그림{f_idx} 렌더링 → {out_path.name}")
         if _render_region_png(pdf_path, page.page_number, bbox, out_path, dpi):
             img_path = str(out_path)
-            b64 = _image_to_base64_uri(img_path)
             print(f"  [Figure] 저장 완료: {out_path.name}")
         else:
             print(f"  [Figure] 이미지 저장 실패")
@@ -406,7 +401,6 @@ def _extract_figure_elements(
             "inner_text": inner_text,
             "text_content": text_content,
             "image_path": img_path,
-            "base64_uri": b64,
             "score": 0.0,
         })
 
@@ -574,9 +568,11 @@ def format_search_results(
     text_chunks: list[dict],
     tables: list[dict],
     figures: list[dict],
-) -> str:
-    """검색 결과를 Markdown으로 직렬화 — base64 이미지 인라인 포함"""
+) -> tuple[str, list[str]]:
+    """검색 결과를 Markdown으로 직렬화. (markdown_text, image_paths) 반환.
+    이미지는 Message(files=[...])로 전달하므로 Markdown에는 경로 참조만 표시."""
     lines: list[str] = []
+    image_paths: list[str] = []
 
     lines += [
         "# PDF Knowledge Search", "",
@@ -603,12 +599,9 @@ def format_search_results(
             lines += [
                 f"### Table {i}  —  Page {tbl['page_number']}  (관련도 {int(tbl['score']*100)}%)", "",
             ]
-            # 표 이미지 (base64 인라인)
-            b64 = tbl.get("base64_uri")
-            if b64:
-                lines += [f"![Table {i}]({b64})", ""]
-            elif tbl.get("image_path"):
-                lines += [f"![Table {i}]({tbl['image_path']})", ""]
+            if tbl.get("image_path"):
+                lines += [f"📎 `{tbl['image_path']}`", ""]
+                image_paths.append(tbl["image_path"])
             # 표 텍스트 (Markdown 표)
             lines += [table_to_markdown(tbl), ""]
 
@@ -621,19 +614,16 @@ def format_search_results(
             ]
             if fig.get("caption"):
                 lines += [f"**캡션**: {fig['caption']}", ""]
-            # 그림 이미지 (base64 인라인)
-            b64 = fig.get("base64_uri")
-            if b64:
-                lines += [f"![Figure {i}]({b64})", ""]
-            elif fig.get("image_path"):
-                lines += [f"**저장 경로**: `{fig['image_path']}`", f"![Figure {i}]({fig['image_path']})", ""]
+            if fig.get("image_path"):
+                lines += [f"📎 `{fig['image_path']}`", ""]
+                image_paths.append(fig["image_path"])
             else:
                 lines += ["*(이미지 없음 — PyMuPDF 설치 필요: pip install pymupdf)*", ""]
 
     if not (text_chunks or tables or figures):
         lines += ["", "> 검색 결과 없음. 쿼리를 바꾸거나 유사도 임계값을 낮춰보세요.", ""]
 
-    return "\n".join(lines)
+    return "\n".join(lines), image_paths
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -827,7 +817,7 @@ class PDFKnowledgeSearchComponent(Component):
             print(f"[Component] [3/3] 그림 검색 생략")
 
         print(f"[Component] 결과 Markdown 생성 중...")
-        md = format_search_results(
+        md, image_paths = format_search_results(
             query=query,
             metadata=index.metadata,
             text_chunks=text_chunks,
@@ -836,9 +826,12 @@ class PDFKnowledgeSearchComponent(Component):
         )
         print(
             f"[Component] === 완료 — "
-            f"본문 {len(text_chunks)}건 / 표 {len(matched_tables)}건 / 그림 {len(matched_figures)}건 ==="
+            f"본문 {len(text_chunks)}건 / 표 {len(matched_tables)}건 / 그림 {len(matched_figures)}건 "
+            f"/ 이미지 첨부 {len(image_paths)}개 ==="
         )
-        return Message(text=md)
+        # 이미지는 files=[] 로 전달 → Chat Output이 직접 렌더링
+        # (base64 data URI를 Markdown에 인라인 삽입하면 깨짐)
+        return Message(text=md, files=image_paths)
 
     def get_element_paths(self) -> Data:
         """저장된 표·그림 이미지 경로 전체 목록 반환"""
