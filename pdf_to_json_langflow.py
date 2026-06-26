@@ -826,9 +826,18 @@ class PDFKnowledgeSearchComponent(Component):
         IntInput(
             name="image_server_port", display_name="이미지 서버 포트", value=8765,
             info=(
-                "Chat Output에서 이미지를 표시하기 위한 로컬 HTTP 서버 포트. "
-                "Langflow와 브라우저가 같은 PC에 있을 때 동작. "
+                "Chat Output 이미지 표시용 HTTP 서버 포트. "
                 "0으로 설정하면 비활성화 (파일 경로만 표시)."
+            ),
+        ),
+        StrInput(
+            name="image_server_host", display_name="이미지 서버 호스트", value="localhost",
+            info=(
+                "이미지 URL에 사용할 호스트명 또는 IP 주소.\n"
+                "• 로컬 환경: localhost (기본값)\n"
+                "• 원격 서버: Langflow가 실행 중인 서버의 IP 또는 도메인 "
+                "(예: 192.168.1.100, my-server.example.com)\n"
+                "브라우저에서 이 호스트의 이미지 서버 포트에 접근 가능해야 합니다."
             ),
         ),
         SecretStrInput(
@@ -893,13 +902,16 @@ class PDFKnowledgeSearchComponent(Component):
         else:
             print(f"[Component] [3/3] 그림 검색 생략")
 
-        # 이미지 HTTP 서버 시작 (로컬 환경에서만 동작)
+        # 이미지 HTTP 서버 시작
         server_url = None
         port = int(self.image_server_port)
+        host = (self.image_server_host or "localhost").strip()
         if port > 0:
             output_dir = str(Path(self.element_output_dir).resolve())
-            print(f"[Component] 이미지 서버 시작 시도: port={port}, dir={output_dir}")
-            server_url = _start_image_server(output_dir, port)
+            print(f"[Component] 이미지 서버 시작: port={port}, dir={output_dir}")
+            _start_image_server(output_dir, port)
+            # 브라우저에서 접근할 URL (server_host 기반)
+            server_url = f"http://{host}:{port}"
             print(f"[Component] 이미지 서버 URL: {server_url}")
         else:
             print(f"[Component] 이미지 서버 비활성화 (port=0)")
