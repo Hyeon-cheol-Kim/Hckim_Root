@@ -16,76 +16,13 @@ PDF를 knowledge base처럼 검색 — 쿼리와 관련된 표·그림을 추출
 from __future__ import annotations
 
 import base64
-import http.server
 import io
 import json
 import re
-import socket as _socket
-import socketserver
-import threading
 from pathlib import Path
 from typing import Optional
 
 import pdfplumber
-
-# ── 이미지 파일 서버 (Chat Output에서 HTTP URL로 이미지 표시) ─────────────────
-_img_server_lock = threading.Lock()
-_img_server: Optional[socketserver.TCPServer] = None
-_img_server_port: int = 0
-_img_server_dir: str = ""
-
-
-def _start_image_server(directory: str, port: int = 8765) -> str:
-    """
-    이미지 디렉토리를 서빙하는 로컬 HTTP 서버를 시작하고 base URL을 반환.
-    이미 같은 디렉토리로 실행 중이면 재사용.
-    반환값: 'http://localhost:{port}' (Chat Output Markdown 이미지 URL 용)
-
-    주의: Langflow와 브라우저가 같은 머신에 있을 때만 동작.
-          Docker / 원격 서버 환경에서는 이미지 대신 파일 경로가 표시됨.
-    """
-    global _img_server, _img_server_port, _img_server_dir
-
-    directory = str(Path(directory).resolve())
-
-    with _img_server_lock:
-        if _img_server is not None and _img_server_dir == directory:
-            return f"http://localhost:{_img_server_port}"
-
-        # 사용 가능한 포트 탐색 (지정 포트 ~ +50)
-        actual_port = port
-        for p in range(port, port + 50):
-            try:
-                with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-                    s.bind(("", p))
-                actual_port = p
-                break
-            except OSError:
-                continue
-
-        class _Handler(http.server.SimpleHTTPRequestHandler):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, directory=directory, **kwargs)
-
-            def log_message(self, fmt, *args):
-                pass  # 액세스 로그 억제
-
-        httpd = socketserver.TCPServer(
-            ("", actual_port), _Handler, bind_and_activate=False
-        )
-        httpd.allow_reuse_address = True
-        httpd.server_bind()
-        httpd.server_activate()
-
-        t = threading.Thread(target=httpd.serve_forever, daemon=True)
-        t.start()
-
-        _img_server = httpd
-        _img_server_port = actual_port
-        _img_server_dir = directory
-
-        print(f"[ImageServer] 이미지 서버 시작: http://localhost:{actual_port}  ← {directory}")
-        return f"http://localhost:{actual_port}"
 
 # ── Langflow imports ──────────────────────────────────────────────────────────
 from langflow.custom import Component
@@ -622,14 +559,10 @@ def format_search_results(
     text_chunks: list[dict],
     tables: list[dict],
     figures: list[dict],
-    server_url: Optional[str] = None,
 ) -> str:
     """검색 결과를 Markdown으로 직렬화.
-    server_url이 있으면 HTTP URL로 이미지를 표시 (가장 안정적).
-    server_url이 없으면 파일 경로 텍스트로 표시.
-
-    Langflow Chat Output은 data: URI와 HTML img 태그를 모두 차단하므로
-    로컬 HTTP 서버를 통한 실제 URL만이 이미지를 정상 표시함."""
+    이미지는 저장 경로를 텍스트로 표시.
+    (Langflow Chat Output은 data URI / HTML img / 로컬 파일 경로 URL을 모두 렌더링하지 않음)"""
     lines: list[str] = []
 
     lines += [
@@ -637,57 +570,43 @@ def format_search_results(
         f"**검색어**: `{query}`  ",
         f"**파일**: {metadata.get('file_name', '')}  ",
         f"**총 페이지**: {metadata.get('total_pages', '')}",
+        "",
     ]
-    if server_url:
-        lines += [f"**이미지 서버**: {server_url}", ""]
-    else:
-        lines += [""]
 
     # ── 관련 본문 ─────────────────────────────────────────────────────────────
     if text_chunks:
         lines += ["---", "", f"## 관련 본문 ({len(text_chunks)}건)", ""]
-        for i, chunk in enumerate(text_chunks, 1):
+        for chunk in text_chunks:
             chunk_text = chunk["text"].strip().replace("\n", "  \n> ")
             lines += [
-                f"### 본문 {i}  —  Page {chunk['page_number']}  (관련도 {int(chunk['score']*100)}%)",
+                f"### Page {chunk['page_number']}  (관련도 {int(chunk['score']*100)}%)",
                 "", f"> {chunk_text}", "",
             ]
 
     # ── 관련 표 ───────────────────────────────────────────────────────────────
     if tables:
         lines += ["---", "", f"## 관련 표 ({len(tables)}건)", ""]
-        for i, tbl in enumerate(tables, 1):
+        for tbl in tables:
             lines += [
-                f"### Table {i}  —  Page {tbl['page_number']}  (관련도 {int(tbl['score']*100)}%)", "",
+                f"### Page {tbl['page_number']}  (관련도 {int(tbl['score']*100)}%)", "",
             ]
-            img_path = tbl.get("image_path")
-            if img_path and server_url:
-                # HTTP URL → Markdown 이미지 (브라우저가 정상 렌더링)
-                url = f"{server_url}/{Path(img_path).name}"
-                lines += [f"![Table {i}]({url})", ""]
-            elif img_path:
-                lines += [f"📎 `{img_path}`", ""]
-            # 표 텍스트 (Markdown 표)
+            if tbl.get("image_path"):
+                lines += [f"🖼 `{tbl['image_path']}`", ""]
             lines += [table_to_markdown(tbl), ""]
 
     # ── 관련 그림 ─────────────────────────────────────────────────────────────
     if figures:
         lines += ["---", "", f"## 관련 그림 ({len(figures)}건)", ""]
-        for i, fig in enumerate(figures, 1):
+        for fig in figures:
             lines += [
-                f"### Figure {i}  —  Page {fig['page_number']}  (관련도 {int(fig['score']*100)}%)", "",
+                f"### Page {fig['page_number']}  (관련도 {int(fig['score']*100)}%)", "",
             ]
             if fig.get("caption"):
                 lines += [f"**캡션**: {fig['caption']}", ""]
-            img_path = fig.get("image_path")
-            if img_path and server_url:
-                # HTTP URL → Markdown 이미지 (브라우저가 정상 렌더링)
-                url = f"{server_url}/{Path(img_path).name}"
-                lines += [f"![Figure {i}]({url})", ""]
-            elif img_path:
-                lines += [f"📎 `{img_path}`", ""]
-            else:
-                lines += ["*(이미지 없음 — pip install pymupdf 후 재시도)*", ""]
+            if fig.get("inner_text"):
+                lines += [f"**내용**: {fig['inner_text'][:200]}", ""]
+            if fig.get("image_path"):
+                lines += [f"🖼 `{fig['image_path']}`", ""]
 
     if not (text_chunks or tables or figures):
         lines += ["", "> 검색 결과 없음. 쿼리를 바꾸거나 유사도 임계값을 낮춰보세요.", ""]
@@ -821,24 +740,7 @@ class PDFKnowledgeSearchComponent(Component):
         ),
         IntInput(
             name="element_dpi", display_name="이미지 해상도 (DPI)", value=150,
-            info="저장 PNG의 DPI (72~300).",
-        ),
-        IntInput(
-            name="image_server_port", display_name="이미지 서버 포트", value=8765,
-            info=(
-                "Chat Output 이미지 표시용 HTTP 서버 포트. "
-                "0으로 설정하면 비활성화 (파일 경로만 표시)."
-            ),
-        ),
-        StrInput(
-            name="image_server_host", display_name="이미지 서버 호스트", value="localhost",
-            info=(
-                "이미지 URL에 사용할 호스트명 또는 IP 주소.\n"
-                "• 로컬 환경: localhost (기본값)\n"
-                "• 원격 서버: Langflow가 실행 중인 서버의 IP 또는 도메인 "
-                "(예: 192.168.1.100, my-server.example.com)\n"
-                "브라우저에서 이 호스트의 이미지 서버 포트에 접근 가능해야 합니다."
-            ),
+            info="저장 PNG의 DPI (72~300). 이미지는 지정 폴더에 저장됩니다.",
         ),
         SecretStrInput(
             name="password", display_name="PDF 비밀번호 (선택)", value="",
@@ -902,20 +804,6 @@ class PDFKnowledgeSearchComponent(Component):
         else:
             print(f"[Component] [3/3] 그림 검색 생략")
 
-        # 이미지 HTTP 서버 시작
-        server_url = None
-        port = int(self.image_server_port)
-        host = (self.image_server_host or "localhost").strip()
-        if port > 0:
-            output_dir = str(Path(self.element_output_dir).resolve())
-            print(f"[Component] 이미지 서버 시작: port={port}, dir={output_dir}")
-            _start_image_server(output_dir, port)
-            # 브라우저에서 접근할 URL (server_host 기반)
-            server_url = f"http://{host}:{port}"
-            print(f"[Component] 이미지 서버 URL: {server_url}")
-        else:
-            print(f"[Component] 이미지 서버 비활성화 (port=0)")
-
         print(f"[Component] 결과 Markdown 생성 중...")
         md = format_search_results(
             query=query,
@@ -923,7 +811,6 @@ class PDFKnowledgeSearchComponent(Component):
             text_chunks=text_chunks,
             tables=matched_tables,
             figures=matched_figures,
-            server_url=server_url,
         )
         print(
             f"[Component] === 완료 — "
