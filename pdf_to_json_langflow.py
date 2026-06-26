@@ -20,82 +20,21 @@ from typing import Optional
 
 import pdfplumber
 
-# ── Langflow 기반 클래스 / 입출력 타입 ───────────────────────────────────────
-#
-# 전략: 더미(fallback) 클래스를 먼저 정의한 뒤 실제 Langflow 클래스로 덮어쓴다.
-# 이렇게 하면 import 실패 시 예외 종류에 무관하게 Component가 항상 정의된 상태이므로
-# NameError가 발생하지 않는다.
-
-
-# ── Step 1: 더미 정의 (단독 실행 또는 import 실패 시 사용) ───────────────────
-
-class Component:  # noqa: E302
-    """Langflow Component 더미 — Langflow가 없을 때 상속 대상으로만 사용"""
-    inputs: list = []
-    outputs: list = []
-
-
-class Data:  # noqa: E302
-    def __init__(self, data=None, **_):
-        self.data = data or {}
-
-
-class Message:  # noqa: E302
-    def __init__(self, text="", **_):
-        self.text = text
-
-
-def _noop(**_):
-    return None
-
-
-BoolInput = DropdownInput = FileInput = FloatInput = _noop
-IntInput = MessageTextInput = SecretStrInput = StrInput = _noop
-Output = _noop
-
-
-# ── Step 2: 실제 Langflow 클래스로 덮어쓰기 (예외가 나도 Step 1 정의가 유지됨) ──
-
-try:
-    from langflow.custom import Component  # type: ignore[no-redef]  # noqa: F811
-except Exception:
-    pass
-
-try:
-    from langflow.schema import Data  # type: ignore[no-redef]  # noqa: F811
-    from langflow.schema.message import Message  # type: ignore[no-redef]  # noqa: F811
-except Exception:
-    pass
-
-try:
-    # Langflow 1.x+ 신버전 — langflow.io
-    from langflow.io import (  # type: ignore[no-redef]  # noqa: F811
-        BoolInput,
-        DropdownInput,
-        FileInput,
-        FloatInput,
-        IntInput,
-        MessageTextInput,
-        SecretStrInput,
-        StrInput,
-        Output,
-    )
-except Exception:
-    try:
-        # 구버전 폴백 — langflow.inputs / langflow.template
-        from langflow.inputs import (  # type: ignore[no-redef]  # noqa: F811
-            BoolInput,
-            DropdownInput,
-            FileInput,
-            FloatInput,
-            IntInput,
-            MessageTextInput,
-            SecretStrInput,
-            StrInput,
-        )
-        from langflow.template import Output  # type: ignore[no-redef]  # noqa: F811
-    except Exception:
-        pass  # 모두 실패 시 Step 1 더미 유지
+# ── Langflow imports ──────────────────────────────────────────────────────────
+from langflow.custom import Component
+from langflow.schema import Data
+from langflow.schema.message import Message
+from langflow.io import (
+    BoolInput,
+    DropdownInput,
+    FileInput,
+    FloatInput,
+    IntInput,
+    MessageTextInput,
+    Output,
+    SecretStrInput,
+    StrInput,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
