@@ -230,14 +230,16 @@ def save_figure_image(
     out_path = output_dir / f"page{page_num}_fig{img_idx}.png"
 
     if out_path.exists():
+        print(f"  [Figure] 캐시 사용: {out_path.name}")
         return str(out_path)
 
     bbox = figure["bbox"]  # (x0, y0, x1, y1) in PDF pts
+    print(f"  [Figure] Page {page_num} / img#{img_idx} 저장 시작 → {out_path.name}")
 
     # ── Method 1: PyMuPDF ────────────────────────────────────────────────────
     try:
         import fitz  # PyMuPDF
-
+        print(f"  [Figure] Method 1: PyMuPDF 사용")
         doc = fitz.open(str(pdf_path))
         pg = doc[page_num - 1]
         scale = dpi / 72.0
@@ -246,17 +248,18 @@ def save_figure_image(
         pix = pg.get_pixmap(matrix=mat, clip=clip, alpha=False)
         pix.save(str(out_path))
         doc.close()
+        print(f"  [Figure] 저장 완료: {out_path}")
         return str(out_path)
     except ImportError:
-        pass
-    except Exception:
-        pass
+        print(f"  [Figure] PyMuPDF 없음 → Method 2 시도")
+    except Exception as e:
+        print(f"  [Figure] PyMuPDF 실패 ({e}) → Method 2 시도")
 
     # ── Method 2: pdf2image + Pillow ─────────────────────────────────────────
     try:
         from pdf2image import convert_from_path
         from PIL import Image as PILImage
-
+        print(f"  [Figure] Method 2: pdf2image + Pillow 사용")
         pages_imgs = convert_from_path(
             str(pdf_path), dpi=dpi, first_page=page_num, last_page=page_num
         )
@@ -269,7 +272,6 @@ def save_figure_image(
 
         sx, sy = iw / pw, ih / ph
         x0, y0, x1, y1 = bbox
-        # PDF 좌표: y=0 is bottom; PIL: y=0 is top
         px0 = int(x0 * sx)
         py0 = int((ph - y1) * sy)
         px1 = int(x1 * sx)
@@ -280,16 +282,17 @@ def save_figure_image(
             min(iw, px1), min(ih, py1),
         ))
         cropped.save(str(out_path), "PNG")
+        print(f"  [Figure] 저장 완료: {out_path}")
         return str(out_path)
     except ImportError:
-        pass
-    except Exception:
-        pass
+        print(f"  [Figure] pdf2image/Pillow 없음 → Method 3 시도")
+    except Exception as e:
+        print(f"  [Figure] pdf2image 실패 ({e}) → Method 3 시도")
 
     # ── Method 3: pdfplumber 내장 스트림 (래스터 이미지) ────────────────────
     try:
         from PIL import Image as PILImage
-
+        print(f"  [Figure] Method 3: pdfplumber 스트림 사용")
         with pdfplumber.open(str(pdf_path)) as pdf:
             pg = pdf.pages[page_num - 1]
             raw_imgs = pg.images
@@ -301,11 +304,13 @@ def save_figure_image(
                                  else bytes(stream))
                     pil_img = PILImage.open(io.BytesIO(raw_bytes))
                     pil_img.save(str(out_path), "PNG")
+                    print(f"  [Figure] 저장 완료: {out_path}")
                     return str(out_path)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  [Figure] pdfplumber 스트림 실패 ({e})")
 
-    return None  # 모든 방법 실패
+    print(f"  [Figure] 모든 방법 실패 — 이미지 저장 불가 (PyMuPDF 설치 권장)")
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -324,27 +329,43 @@ class PDFIndex:
         self._load(password)
 
     def _load(self, password: Optional[str]):
+        print(f"[PDF] 파일 열기: {self.pdf_path.name}")
         kwargs = {"password": password} if password else {}
         with pdfplumber.open(self.pdf_path, **kwargs) as pdf:
             raw_meta = pdf.metadata or {}
+            total = len(pdf.pages)
             self.metadata = {
                 "file_name": self.pdf_path.name,
-                "total_pages": len(pdf.pages),
+                "total_pages": total,
                 "title": raw_meta.get("Title", ""),
                 "author": raw_meta.get("Author", ""),
                 "creator": raw_meta.get("Creator", ""),
             }
+            print(f"[PDF] 총 {total}페이지 감지 — 페이지별 파싱 시작")
             for page in pdf.pages:
+                pn = page.page_number
+                print(f"  [Page {pn}/{total}] 텍스트 추출 중...")
                 text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
                 self.pages_text.append(text)
-                self.tables.extend(_extract_tables_with_context(page))
-                self.figures.extend(_extract_figures_with_context(page))
+
+                print(f"  [Page {pn}/{total}] 표(Table) 추출 중...")
+                tbls = _extract_tables_with_context(page)
+                self.tables.extend(tbls)
+                print(f"  [Page {pn}/{total}] 표 {len(tbls)}개 발견")
+
+                print(f"  [Page {pn}/{total}] 그림(Figure) 추출 중...")
+                figs = _extract_figures_with_context(page)
+                self.figures.extend(figs)
+                print(f"  [Page {pn}/{total}] 그림 {len(figs)}개 발견")
+
+            print(f"[PDF] 인덱싱 완료 — 표 총 {len(self.tables)}개 / 그림 총 {len(self.figures)}개")
 
     # ── 검색 ──────────────────────────────────────────────────────────────────
 
     def search_tables(
         self, query: str, top_k: int = 5, threshold: float = 0.05
     ) -> list[dict]:
+        print(f"[Search] 표 유사도 스코어링 — 후보 {len(self.tables)}개 (임계값 {threshold})")
         scored = []
         for t in self.tables:
             doc = " ".join([
@@ -356,11 +377,14 @@ class PDFIndex:
             if score >= threshold:
                 scored.append({**t, "score": score})
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:top_k]
+        result = scored[:top_k]
+        print(f"[Search] 표 검색 결과: {len(result)}건 (상위 {top_k}개 반환)")
+        return result
 
     def search_figures(
         self, query: str, top_k: int = 5, threshold: float = 0.05
     ) -> list[dict]:
+        print(f"[Search] 그림 유사도 스코어링 — 후보 {len(self.figures)}개 (임계값 {threshold})")
         scored = []
         for fig in self.figures:
             page_idx = fig["page_number"] - 1
@@ -370,7 +394,9 @@ class PDFIndex:
             if score >= threshold:
                 scored.append({**fig, "score": score})
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:top_k]
+        result = scored[:top_k]
+        print(f"[Search] 그림 검색 결과: {len(result)}건 (상위 {top_k}개 반환)")
+        return result
 
     def search_text_chunks(
         self, query: str, top_k: int = 5, threshold: float = 0.05,
@@ -386,14 +412,16 @@ class PDFIndex:
                         "text": chunk,
                         "score": 0.0,
                     })
-
+        print(f"[Search] 본문 청크 유사도 스코어링 — 후보 {len(chunks)}개 (임계값 {threshold})")
         scored = []
         for c in chunks:
             score = compute_similarity(query, c["text"])
             if score >= threshold:
                 scored.append({**c, "score": score})
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:top_k]
+        result = scored[:top_k]
+        print(f"[Search] 본문 검색 결과: {len(result)}건 (상위 {top_k}개 반환)")
+        return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -646,36 +674,52 @@ class PDFKnowledgeSearchComponent(Component):
     def _get_index(self) -> PDFIndex:
         pdf_path = str(self.pdf_file)
         if self._cached_path != pdf_path:
+            print(f"[Component] PDF 인덱싱 시작: {Path(pdf_path).name}")
             self._cached_index = PDFIndex(pdf_path, self.password or None)
             self._cached_path = pdf_path
+        else:
+            print(f"[Component] 캐시된 인덱스 재사용: {Path(pdf_path).name}")
         return self._cached_index  # type: ignore[return-value]
 
     def search(self) -> Message:
+        print(f"[Component] === PDF Knowledge Search 시작 ===")
+        print(f"[Component] 쿼리: '{self.search_query}'")
+
         index = self._get_index()
         query = self.search_query
 
-        text_chunks = (
-            index.search_text_chunks(query, self.top_k, self.similarity_threshold)
-            if self.search_text else []
-        )
-        matched_tables = (
-            index.search_tables(query, self.top_k, self.similarity_threshold)
-            if self.search_tables else []
-        )
-        matched_figures = (
-            index.search_figures(query, self.top_k, self.similarity_threshold)
-            if self.search_figures else []
-        )
+        if self.search_text:
+            print(f"[Component] [1/3] 본문 검색 중...")
+            text_chunks = index.search_text_chunks(query, self.top_k, self.similarity_threshold)
+        else:
+            print(f"[Component] [1/3] 본문 검색 생략")
+            text_chunks = []
 
-        # 그림 이미지 저장
+        if self.search_tables:
+            print(f"[Component] [2/3] 표 검색 중...")
+            matched_tables = index.search_tables(query, self.top_k, self.similarity_threshold)
+        else:
+            print(f"[Component] [2/3] 표 검색 생략")
+            matched_tables = []
+
         if self.search_figures:
-            out_dir = Path(self.figure_output_dir)
-            for fig in matched_figures:
-                saved = save_figure_image(
-                    str(self.pdf_file), fig, out_dir, dpi=int(self.figure_dpi)
-                )
-                fig["saved_path"] = saved
+            print(f"[Component] [3/3] 그림 검색 중...")
+            matched_figures = index.search_figures(query, self.top_k, self.similarity_threshold)
+            if matched_figures:
+                out_dir = Path(self.figure_output_dir)
+                print(f"[Component] 그림 {len(matched_figures)}개 이미지 저장 → {out_dir.resolve()}")
+                for fig in matched_figures:
+                    saved = save_figure_image(
+                        str(self.pdf_file), fig, out_dir, dpi=int(self.figure_dpi)
+                    )
+                    fig["saved_path"] = saved
+            else:
+                print(f"[Component] [3/3] 관련 그림 없음")
+        else:
+            print(f"[Component] [3/3] 그림 검색 생략")
+            matched_figures = []
 
+        print(f"[Component] 결과 포맷 생성 중...")
         md = format_search_results(
             query=query,
             metadata=index.metadata,
@@ -683,10 +727,12 @@ class PDFKnowledgeSearchComponent(Component):
             tables=matched_tables,
             figures=matched_figures,
         )
+        print(f"[Component] === 완료 — 본문 {len(text_chunks)}건 / 표 {len(matched_tables)}건 / 그림 {len(matched_figures)}건 ===")
         return Message(text=md)
 
     def get_figures(self) -> Data:
-        """저장된 그림 경로 목록을 Data로 반환 (search() 이후 호출)"""
+        """저장된 그림 경로 목록을 Data로 반환"""
+        print(f"[Component] Figure Paths 출력 요청")
         index = self._get_index()
         query = self.search_query
         matched = (
@@ -701,6 +747,7 @@ class PDFKnowledgeSearchComponent(Component):
             )
             if saved:
                 paths.append(saved)
+        print(f"[Component] 저장된 그림 경로 {len(paths)}건 반환")
         return Data(data={"figure_paths": paths, "count": len(paths)})
 
 
@@ -727,14 +774,20 @@ class PDFToJsonComponent(Component):
     outputs = [Output(display_name="JSON Data", name="json_data", method="convert")]
 
     def convert(self) -> Data:
+        pdf_name = Path(str(self.pdf_file)).name
+        print(f"[Component] === PDF to JSON 변환 시작: {pdf_name} ===")
         result = convert_pdf_to_json(
             pdf_path=self.pdf_file,
             extract_images=self.extract_images,
             extract_word_positions=self.extract_word_positions,
             password=self.password or None,
         )
+        s = result["summary"]
+        print(f"[Component] 변환 완료 — 페이지 {s['total_pages']}개 / 표 {s['total_tables']}개 / 이미지 {s['total_images']}개")
         if self.output_format == "JSON 문자열":
+            print(f"[Component] 출력 형식: JSON 문자열")
             return Data(data={"json_string": json.dumps(result, ensure_ascii=False, indent=2)})
+        print(f"[Component] 출력 형식: 구조화된 Data")
         return Data(data=result)
 
 
