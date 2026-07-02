@@ -771,6 +771,7 @@ class PDFKnowledgeSearchComponent(Component):
 
     outputs = [
         Output(display_name="Markdown Result", name="result", method="search"),
+        Output(display_name="LLM Context (텍스트 전용)", name="llm_context", method="get_llm_context"),
         Output(display_name="Element Paths", name="element_paths", method="get_element_paths"),
     ]
 
@@ -839,6 +840,62 @@ class PDFKnowledgeSearchComponent(Component):
             f"본문 {len(text_chunks)}건 / 표 {len(matched_tables)}건 / 그림 {len(matched_figures)}건 ==="
         )
         return Message(text=md)
+
+    def get_llm_context(self) -> Message:
+        """이미지 없이 텍스트만 포함한 LLM 입력용 컨텍스트 반환"""
+        print(f"[Component] === LLM Context 생성 시작 ===")
+        print(f"[Component] 쿼리: '{self.search_query}'")
+
+        index = self._get_index()
+        query = self.search_query
+
+        text_chunks = []
+        if self.search_text:
+            text_chunks = index.search_text_chunks(query, self.top_k, self.similarity_threshold)
+
+        matched_tables = []
+        if self.search_tables:
+            matched_tables = index.search_tables(query, self.top_k, self.similarity_threshold)
+
+        matched_figures = []
+        if self.search_figures:
+            matched_figures = index.search_figures(query, self.top_k, self.similarity_threshold)
+
+        lines: list[str] = []
+
+        if text_chunks:
+            lines += [f"## 관련 본문 ({len(text_chunks)}건)", ""]
+            for chunk in text_chunks:
+                lines += [
+                    f"### Page {chunk['page_number']}  (관련도 {int(chunk['score']*100)}%)",
+                    "", chunk["text"].strip(), "",
+                ]
+
+        if matched_tables:
+            lines += [f"## 관련 표 ({len(matched_tables)}건)", ""]
+            for tbl in matched_tables:
+                lines += [
+                    f"### Page {tbl['page_number']}  (관련도 {int(tbl['score']*100)}%)", "",
+                    table_to_markdown(tbl), "",
+                ]
+
+        if matched_figures:
+            lines += [f"## 관련 그림 ({len(matched_figures)}건)", ""]
+            for fig in matched_figures:
+                lines += [
+                    f"### Page {fig['page_number']}  (관련도 {int(fig['score']*100)}%)", "",
+                ]
+                if fig.get("caption"):
+                    lines += [f"캡션: {fig['caption']}", ""]
+                if fig.get("inner_text"):
+                    lines += [f"내용: {fig['inner_text']}", ""]
+
+        if not (text_chunks or matched_tables or matched_figures):
+            lines += ["검색 결과 없음. 쿼리를 바꾸거나 유사도 임계값을 낮춰보세요."]
+
+        context_text = "\n".join(lines)
+        print(f"[Component] LLM Context 생성 완료 — {len(context_text)} chars")
+        return Message(text=context_text)
 
     def get_element_paths(self) -> Data:
         """저장된 표·그림 이미지 경로 전체 목록 반환"""
