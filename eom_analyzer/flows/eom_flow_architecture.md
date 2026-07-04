@@ -59,6 +59,22 @@ LLM 앞단인 **②a Sampler**(→ Prompt → LLM)와, 후단인 **③ JSON Buil
 - 공용 코어 `eom_eye_core.py` : ④/⑤가 좌표변환·중심탐지·마진·시각화 로직을 공유
   (이미지 표기 마진 = DB 저장 마진 일치 보장). 컴포넌트가 아니라 import 모듈.
 
+### ② Prompt 컴포넌트에 넣을 내용
+Prompt 노드의 `template` 에는 `flows/prompts/eom_pattern_prompt.txt` 내용을 그대로 넣는다.
+(flow JSON 에도 이 텍스트가 이미 임베드되어 있음.) 핵심 구성:
+- **역할 지정** + 찾을 정보 5종을 **유사 키워드**와 함께 제시
+  (voltage↔amp, timing↔phase, error↔errs, lane↔CH, MaxSteps↔MaxPhase 등)
+- **정규식 규칙**: `data_pattern` 은 named group `(?P<timing>)(?P<voltage>)(?P<error>)` 필수,
+  `(?P<lane>)` 선택 / `config_pattern` 은 4개 축 그룹 / JSON이므로 역슬래시는 `\\d` 처럼 2번.
+- **few-shot 예시 2종** (표준 QC 포맷 + 키워드가 다른 벤더 변형) — 입력 로그와
+  기대 출력 JSON을 함께 제시하여 유사어 인식·형식을 학습시킴.
+- **출력 형식 고정**: 마크다운·설명 금지, `{{"config_pattern": ..., "data_pattern": ..., "default_fill": 63}}` JSON만.
+- **변수**: `{log_sample}` (②a Sampler 출력) 만 실제 치환 변수. 나머지 리터럴 중괄호는
+  Langflow Prompt 문법상 `{{ }}` 로 이스케이프되어 있음.
+
+> 검증됨: 두 예시의 정규식은 실제 파서로 config 4필드 + 데이터 3행을 정확히 추출하고,
+> 기대 출력 JSON은 `③ JSON Builder`의 응답 파서(`parse_llm_patterns`)와 동일 규칙으로 파싱된다.
+
 ### 기존 대비 변경 요약
 - **분리(신규)**: 파일 읽기를 `EOMLogLoader`로 독립 → 이중 파일 읽기 제거, 배선 명확화.
 - **②a Sampler**: 입력 `file_path` → `log_text`(① 출력) 로 변경.
