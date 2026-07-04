@@ -32,7 +32,10 @@
 
       {% if error %}
       <hr style="border-color:var(--line); margin:20px 0">
-      <p style="color:var(--red)">{{ error }}</p>
+      <p style="color:var(--red); font-weight:600; margin-bottom:6px">분석 오류</p>
+      <pre style="color:var(--red); background:var(--bg); border:1px solid var(--red);
+                  border-radius:6px; padding:12px; white-space:pre-wrap;
+                  word-break:break-word; font-size:13px; margin:0">{{ error }}</pre>
       {% endif %}
 
       {% if rows %}

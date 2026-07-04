@@ -62,6 +62,39 @@ def build_tweaks(file_path: str, model: str) -> dict:
     return tweaks
 
 
+class FlowRunError(Exception):
+    """Langflow flow 실행 실패. 사용자에게 보여줄 진단 메시지를 담는다."""
+
+
+def _extract_flow_error(resp: httpx.Response) -> str:
+    """Langflow 오류 응답에서 사용자용 진단 메시지를 최대한 추출.
+
+    ③ JSON Builder의 EOMParseError('파싱 실패: ...') 같은 컴포넌트 오류를
+    우선 골라내고, 없으면 detail/message/error 필드, 그래도 없으면 raw 일부.
+    """
+    raw = resp.text or ""
+    # 1) 우리 컴포넌트가 낸 진단 메시지 우선 (JSON 이스케이프 정리 후 첫 문장)
+    for marker in ("파싱 실패", "EOMParseError", "키워드 식별/파싱"):
+        idx = raw.find(marker)
+        if idx != -1:
+            snippet = raw[idx:idx + 600].replace("\\n", "\n").replace('\\"', '"')
+            return snippet.split("\n")[0].rstrip('"\\ ,}')[:400]
+    # 2) 표준 오류 필드
+    try:
+        body = resp.json()
+    except Exception:
+        return (raw[:400] or f"HTTP {resp.status_code}")
+    for key in ("detail", "message", "error"):
+        v = body.get(key) if isinstance(body, dict) else None
+        if isinstance(v, str) and v.strip():
+            return v[:400]
+        if isinstance(v, dict):
+            for k2 in ("message", "error", "detail"):
+                if isinstance(v.get(k2), str) and v[k2].strip():
+                    return v[k2][:400]
+    return (json.dumps(body, ensure_ascii=False)[:400] or f"HTTP {resp.status_code}")
+
+
 async def run_langflow_flow(file_path: str, model: str) -> dict:
     url = f"{LANGFLOW_URL}/api/v1/run/{FLOW_ID}"
     payload = {
@@ -71,8 +104,15 @@ async def run_langflow_flow(file_path: str, model: str) -> dict:
         "tweaks": build_tweaks(file_path, model),
     }
     async with httpx.AsyncClient(timeout=FLOW_TIMEOUT_S) as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
+        try:
+            resp = await client.post(url, json=payload)
+        except httpx.HTTPError as e:
+            raise FlowRunError(
+                f"Langflow 연결 실패: {e}. "
+                f"LANGFLOW_URL({LANGFLOW_URL})과 EOM_FLOW_ID({FLOW_ID})를 확인하세요."
+            ) from e
+        if resp.is_error:
+            raise FlowRunError(_extract_flow_error(resp))
         return resp.json()
 
 
@@ -93,10 +133,11 @@ async def upload_log(request: Request,
                      file: UploadFile = File(...),
                      model: str = Form("claude")):
     (STORAGE / "uploads").mkdir(parents=True, exist_ok=True)
-    dest = STORAGE / "uploads" / file.filename
+    safe_name = Path(file.filename or "eom_log.txt").name  # 경로 탈출 방지
+    dest = STORAGE / "uploads" / safe_name
     dest.write_bytes(await file.read())
 
-    ctx: dict = {"request": request, "filename": file.filename, "model": model}
+    ctx: dict = {"request": request, "filename": safe_name, "model": model}
     try:
         await run_langflow_flow(str(dest), model)
         # flow가 DB/이미지를 생성하므로, 최신 run을 DB에서 재조회해 표시
@@ -107,10 +148,9 @@ async def upload_log(request: Request,
                     "error": None if rows else
                     "flow는 완료됐지만 DB에서 결과를 찾지 못했습니다. "
                     "⑥ DB Writer 연결과 db_url 경로를 확인하세요."})
-    except httpx.HTTPError as e:
-        ctx["error"] = (f"Langflow 호출 실패: {e}. "
-                        f"LANGFLOW_URL({LANGFLOW_URL})과 "
-                        f"EOM_FLOW_ID({FLOW_ID})를 확인하세요.")
+    except FlowRunError as e:
+        # ③ JSON Builder의 파싱 진단 등 Langflow 오류를 그대로 화면에 표시
+        ctx["error"] = str(e)
     return templates.TemplateResponse("upload.html", ctx)
 
 
