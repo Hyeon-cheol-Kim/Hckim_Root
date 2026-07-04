@@ -1,3 +1,6 @@
 colormap_preview.png
 *.pyc
 __pycache__/
+
+# 테스트 실행 시 생성되는 산출물 (재생성 가능)
+eom_analyzer/tests/out_test/frontend_test.db
