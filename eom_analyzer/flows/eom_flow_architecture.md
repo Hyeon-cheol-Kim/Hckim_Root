@@ -51,13 +51,30 @@ LLM 앞단인 **②a Sampler**(→ Prompt → LLM)와, 후단인 **③ JSON Buil
 | ②a | **EOM Log Sampler** | 커스텀 | `log_text` (①), `head_lines` | `log_sample` : Message → Prompt | `eom_log_sampler.py` | **I/O 변경** |
 | ② | **Prompt** | 내장 | `log_sample` (②a), `template` | `prompt` : Message → LLM | (Langflow 내장) | 조립 |
 | ② | **Language Model** | 내장 | `input_value` (Prompt), `provider/model/api_key` | `text` : Message(패턴 JSON) → ③ | (Langflow 내장) | 조립 |
-| ③ | **EOM JSON Builder** | 커스텀 | `llm_patterns` (②), `log_text` (①), `source_file`·`llm_model` (tweaks), `output_dir` | `eom_json` : Data → ④, ⑤ | `eom_json_builder.py` | **I/O 변경** |
+| ③ | **EOM JSON Builder** | 커스텀 | `llm_patterns` (②), `log_text` (①), `source_file`·`llm_model` (tweaks), `output_dir` | `eom_json` : Data → ④, ⑤ | `eom_json_builder.py` | **I/O 변경 + 검증계층** |
 | ④ | **EOM Heatmap Plotter** | 커스텀 | `eom_json` (③), `output_dir`, `dpi` | `plot_result` : Data → ⑥ | `eom_heatmap_plotter.py` | 유지 |
 | ⑤ | **EOM Margin Calculator** | 커스텀 | `eom_json` (③), `fail_width_ui`, `fail_height_mv` | `margins` : Data → ⑥ | `eom_margin_calculator.py` | 유지 |
 | ⑥ | **EOM DB Writer** | 커스텀 | `margins` (⑤), `plot_result` (④), `db_url` | `result` : Data | `eom_db_writer.py` | 유지 |
 
 - 공용 코어 `eom_eye_core.py` : ④/⑤가 좌표변환·중심탐지·마진·시각화 로직을 공유
   (이미지 표기 마진 = DB 저장 마진 일치 보장). 컴포넌트가 아니라 import 모듈.
+
+### ③ JSON Builder — 파싱 결과 검증·재선택·예외처리 (결정론적)
+키워드 식별(LLM)·파싱(Python) 결과가 제대로 됐는지 도메인 기준으로 채점하고,
+잘못됐으면 다른 후보로 재선택한다. LLM을 다시 부르지 않는 결정론적 방식.
+
+- **후보**: ① LLM 패턴(구조 유효 시) + ② QC 기본 패턴. 각각으로 파싱→채점.
+- **품질 지표** (`evaluate_candidate`):
+  - `matched_cells` — 유효 (lane,t,v) 셀 수 (≥ `MIN_DISTINCT_CELLS`=4)
+  - `valid_error_ratio` — error 값이 `[0, fill]` 내 비율 (≥ 0.9; 엉뚱한 필드 잡으면 값이 튐)
+  - `in_range_ratio` — config 있을 때 `|t|≤t_max, |v|≤v_max` 비율 (≥ 0.9)
+  - `config 축 상한` — `t_max/v_max ≤ MAX_AXIS_HALF`(256): 거대 축/메모리 폭주 방지
+  - `lane_count` — 1~8 상식 범위
+- **재선택**: 기준 통과 후보 중 `score`(= 유효셀 × error정합 × 축범위정합) 최고 채택.
+  결정 근거는 `meta.validation`(chosen / chosen_metrics / candidates)에 기록.
+- **예외처리**: 어느 후보도 기준 미달이면 `EOMParseError`(후보별 진단 리포트 포함)를
+  발생시켜 flow가 **원인과 함께 명확히 중단**된다. (바닥 ValueError·garbage 진행 방지)
+  - 예) `파싱 실패: … 후보: llm(cells=0, 유효 셀 부족); fallback(cells=2, error 값 범위 이탈)`
 
 ### ② Prompt 컴포넌트에 넣을 내용
 Prompt 노드의 `template` 에는 `flows/prompts/eom_pattern_prompt.txt` 내용을 그대로 넣는다.
