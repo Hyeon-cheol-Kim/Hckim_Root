@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PAM4 EOM Agent — 결과 조회</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>PAM4 <span>EOM</span> AGENT</h1>
+    <div class="sub"><a href="/" style="color:var(--muted)">← 메뉴로</a></div>
+  </header>
+  <main>
+    <div class="card">
+      <div class="tag">MENU 2</div>
+      <h2>결과 DB 조회 / 비교</h2>
+
+      <!-- 필터 -->
+      <form method="get" action="/results"
+            style="display:grid; grid-template-columns:2fr 1fr 1fr auto; gap:10px; align-items:end">
+        <div><label>파일명 검색</label>
+          <input type="text" name="filename" value="{{ f_filename }}"
+                 style="width:100%; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:9px"></div>
+        <div><label>Lane</label>
+          <select name="lane">
+            <option value="">전체</option>
+            {% for l in ["Lane0","Lane1"] %}
+            <option value="{{ l }}" {{ 'selected' if f_lane==l }}>{{ l }}</option>
+            {% endfor %}
+          </select></div>
+        <div><label>Eye</label>
+          <select name="eye">
+            <option value="">전체</option>
+            {% for e in ["Upper","Middle","Lower"] %}
+            <option value="{{ e }}" {{ 'selected' if f_eye==e }}>{{ e }}</option>
+            {% endfor %}
+          </select></div>
+        <div><button type="submit">조회</button></div>
+      </form>
+
+      <!-- 테이블 -->
+      <div style="max-height:300px; overflow:auto; margin-top:18px">
+      <table>
+        <thead>
+          <tr><th>run_id</th><th>파일</th><th>모델</th><th>Lane</th><th>Eye</th>
+              <th>W (UI)</th><th>H (mV)</th><th>판정</th><th>이미지</th><th>일시</th></tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            <td style="font-size:11px">{{ r.run_id }}</td>
+            <td>{{ r.filename }}</td><td>{{ r.model }}</td>
+            <td>{{ r.lane }}</td><td>{{ r.eye }}</td>
+            <td>{{ "%.4f"|format(r.width_ui) }}</td>
+            <td>{{ "%.1f"|format(r.height_mv) }}</td>
+            <td style="color:{{ 'var(--teal)' if r['pass'] else 'var(--red)' }}; font-weight:600">
+              {{ 'PASS' if r['pass'] else 'FAIL' }}</td>
+            <td>{% if r.image_path %}<a href="/{{ r.image_path }}" target="_blank" style="color:var(--teal)">보기</a>{% endif %}</td>
+            <td style="font-size:11px">{{ r.created_at }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="10" class="todo">조건에 맞는 결과가 없습니다</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <!-- 차트 A: W/H 분포 산점도 -->
+    <div class="card" style="margin-top:20px">
+      <div class="tag">CHART A</div>
+      <h2>W/H 분포 (Fail zone: W ≤ 0.24 UI 또는 H ≤ 50 mV)</h2>
+      <canvas id="scatterChart" height="130"></canvas>
+    </div>
+
+    <!-- 차트 B: run별 추이 -->
+    <div class="card" style="margin-top:20px">
+      <div class="tag">CHART B</div>
+      <h2>Run별 Margin 추이</h2>
+      <canvas id="trendW" height="110"></canvas>
+      <canvas id="trendH" height="110" style="margin-top:16px"></canvas>
+    </div>
+  </main>
+
+<script>
+const DATA = {{ chart_json | safe }};
+const FAIL_W = 0.24, FAIL_H = 50;
+const EYE_COLORS = {Upper: "#4da3ff", Middle: "#2dd4bf", Lower: "#c792ea"};
+const LANE_STYLE = {Lane0: "circle", Lane1: "triangle"};
+const GRID = "#1e3a5c", TICK = "#7d93ad", TEXT = "#dbe7f3", RED = "#f0564a";
+
+Chart.defaults.color = TICK;
+Chart.defaults.borderColor = GRID;
+
+// ---- Fail zone 배경 플러그인 (차트 A) ----
+const failZonePlugin = {
+  id: "failZone",
+  beforeDatasetsDraw(chart) {
+    const {ctx, chartArea: a, scales: {x, y}} = chart;
+    ctx.save();
+    ctx.fillStyle = "rgba(240, 86, 74, 0.13)";
+    const xF = Math.min(x.getPixelForValue(FAIL_W), a.right);
+    const yF = Math.max(y.getPixelForValue(FAIL_H), a.top);
+    ctx.fillRect(a.left, a.top, xF - a.left, a.bottom - a.top);   // W<=0.24
+    ctx.fillRect(a.left, yF, a.right - a.left, a.bottom - yF);     // H<=50
+    ctx.strokeStyle = RED; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(xF, a.top); ctx.lineTo(xF, a.bottom); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(a.left, yF); ctx.lineTo(a.right, yF); ctx.stroke();
+    ctx.restore();
+  }
+};
+
+// ---- 차트 A: 산점도 ----
+(function () {
+  const groups = {};
+  for (const p of DATA.scatter) {
+    const key = `${p.eye} ${p.lane}`;
+    (groups[key] ||= {eye: p.eye, lane: p.lane, pts: []}).pts.push(p);
+  }
+  const datasets = Object.entries(groups).map(([label, g]) => ({
+    label,
+    data: g.pts,
+    backgroundColor: EYE_COLORS[g.eye],
+    pointStyle: LANE_STYLE[g.lane],
+    pointRadius: g.pts.map(p => p.pass ? 4 : 6),
+    pointBorderColor: g.pts.map(p => p.pass ? "transparent" : RED),
+    pointBorderWidth: g.pts.map(p => p.pass ? 0 : 2),
+  }));
+  new Chart(document.getElementById("scatterChart"), {
+    type: "scatter",
+    data: {datasets},
+    options: {
+      plugins: {
+        legend: {labels: {usePointStyle: true, color: TEXT, boxWidth: 8}},
+        tooltip: {callbacks: {label: c =>
+          `${c.dataset.label} ${c.raw.run_id}: W=${c.raw.x.toFixed(3)}UI, H=${c.raw.y.toFixed(1)}mV ${c.raw.pass ? "PASS" : "FAIL"}`}},
+      },
+      scales: {
+        x: {title: {display: true, text: "Eye Width (UI)", color: TEXT}, min: 0, grid: {color: GRID}},
+        y: {title: {display: true, text: "Eye Height (mV)", color: TEXT}, min: 0, grid: {color: GRID}},
+      },
+    },
+    plugins: [failZonePlugin],
+  });
+})();
+
+// ---- 차트 B: 추이 ----
+function trendChart(canvasId, field, yTitle, failLine) {
+  const datasets = DATA.trend.series.map(s => ({
+    label: s.label,
+    data: s[field],
+    borderColor: EYE_COLORS[s.eye],
+    backgroundColor: EYE_COLORS[s.eye],
+    borderDash: s.lane === "Lane1" ? [6, 4] : [],
+    pointStyle: LANE_STYLE[s.lane],
+    pointRadius: 3.5,
+    tension: 0.15,
+    spanGaps: true,
+  }));
+  new Chart(document.getElementById(canvasId), {
+    type: "line",
+    data: {labels: DATA.trend.labels, datasets},
+    options: {
+      plugins: {
+        legend: {labels: {usePointStyle: true, color: TEXT, boxWidth: 8}},
+        annotationLine: {},
+      },
+      scales: {
+        x: {grid: {color: GRID}},
+        y: {title: {display: true, text: yTitle, color: TEXT}, grid: {color: GRID}},
+      },
+    },
+    plugins: [{
+      id: "failLine",
+      beforeDatasetsDraw(chart) {
+        const {ctx, chartArea: a, scales: {y}} = chart;
+        const yPx = y.getPixelForValue(failLine);
+        if (yPx < a.top || yPx > a.bottom) return;
+        ctx.save();
+        ctx.strokeStyle = RED; ctx.setLineDash([3, 4]); ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.moveTo(a.left, yPx); ctx.lineTo(a.right, yPx); ctx.stroke();
+        ctx.restore();
+      }
+    }],
+  });
+}
+trendChart("trendW", "width", "Width (UI)", FAIL_W);
+trendChart("trendH", "height", "Height (mV)", FAIL_H);
+</script>
+</body>
+</html>

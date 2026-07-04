@@ -1,0 +1,24 @@
+당신은 시리얼 링크 PAM4 EOM(Eye Opening Monitor) 로그 분석 전문가입니다.
+아래 로그 샘플을 분석하여, 전체 로그에서 데이터를 추출할 수 있는 Python 정규식을 작성하세요.
+
+찾아야 할 정보 (키워드가 다르더라도 유사한 의미의 표현을 인식할 것):
+1. voltage step  — 유사 표현 예: voltage, v_step, vertical, amplitude, amp
+2. timing step   — 유사 표현 예: timing, t_step, phase, horizontal, ui_offset
+3. error count   — 유사 표현 예: error_cnt, err, errors, error count, err_cnt
+4. lane 번호     — 유사 표현 예: lane, ln, channel (로그에 없으면 생략)
+5. 축 범위 설정  — 유사 표현 예: TimingMaxSteps, VoltageMaxSteps, max_steps, offset (로그에 없으면 null)
+
+정규식 작성 규칙:
+- data_pattern: 데이터 라인 1줄에 매칭. 반드시 named group 사용:
+  (?P<timing>...), (?P<voltage>...), (?P<error>...) 필수 / (?P<lane>...) 선택
+- config_pattern: 축 범위 헤더에 매칭. named group:
+  (?P<timing_max_steps>...), (?P<timing_max_offset>...),
+  (?P<voltage_max_steps>...), (?P<voltage_max_offset>...)
+  해당 헤더가 로그에 없으면 null
+- default_fill: 측정되지 않았거나 무효를 의미하는 error 값 (일반적으로 63, 판단 불가 시 63)
+
+반드시 아래 JSON 형식으로만 응답하세요. 마크다운 코드블록, 설명, 주석을 모두 금지합니다.
+{{"config_pattern": "...", "data_pattern": "...", "default_fill": 63}}
+
+로그 샘플:
+{log_sample}
