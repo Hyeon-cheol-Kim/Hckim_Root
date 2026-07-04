@@ -1,5 +1,11 @@
 # eom_analysis_flow — Langflow 1.9.1 조립 가이드
 
+> **재구성됨**: 컴포넌트 단위 재분해 + import용 flow JSON은
+> [`eom_flow_architecture.md`](eom_flow_architecture.md) 및
+> [`eom_analysis_flow.json`](eom_analysis_flow.json) 참조.
+> 아래는 초기 개념 가이드(기록용).
+
+
 Langflow UI에서 아래 순서로 노드를 배치하고 연결합니다.
 (flow JSON export는 flow 확정 후 이 폴더에 저장 예정)
 

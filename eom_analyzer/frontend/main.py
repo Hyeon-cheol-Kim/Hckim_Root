@@ -39,14 +39,23 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 
 def build_tweaks(file_path: str, model: str) -> dict:
-    """Langflow run API tweaks.
+    """Langflow run API tweaks (재구성된 컴포넌트 단위 반영).
 
-    키는 Langflow에서 조립한 flow의 컴포넌트 ID와 일치해야 한다.
-    (flow 조립 후 UI의 컴포넌트 ID 확인 — 커스텀 컴포넌트는 name 속성 기본값)
+    키는 Langflow에서 조립한 flow의 노드 ID와 일치해야 한다.
+    Langflow는 노드에 접미사를 붙여 ID를 만들 수 있으므로(예: EOMLogLoader-a1B2c),
+    flow 조립 시 노드 ID를 아래 name 값으로 고정하거나, export한 flow JSON의
+    노드 ID에 맞춰 이 키들을 교체해야 한다.
+
+    - ① Loader     : 파일 경로 주입 (파일 읽기 단일 책임)
+    - ③ JSON Builder: 파일명(meta/파일명용) + LLM 모델명 주입
+      (log_text는 Loader 출력이 edge로 전달되므로 tweaks 불필요)
     """
     tweaks = {
-        "EOMLogSampler": {"file_path": file_path},
-        "EOMJsonBuilder": {"file_path": file_path, "llm_model": model},
+        "EOMLogLoader": {"file_path": file_path},
+        "EOMJsonBuilder": {
+            "source_file": Path(file_path).name,
+            "llm_model": model,
+        },
     }
     # LLM provider 전환: flow에서 사용한 Language Model 컴포넌트 ID로 교체
     # 예) tweaks["LanguageModelComponent"] = {"provider": model_provider_map[model]}

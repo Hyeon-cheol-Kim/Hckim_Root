@@ -1,0 +1,1039 @@
+{
+  "id": "ef715675-7de9-4074-83e9-ce1dac36e6fb",
+  "name": "eom_analysis_flow",
+  "description": "PAM4 EOM Agent — Loader→Sampler→Prompt→LLM→JSON Builder→(Plotter,Margin)→DB Writer",
+  "data": {
+    "nodes": [
+      {
+        "id": "EOMLogLoader",
+        "type": "genericNode",
+        "position": {
+          "x": 60,
+          "y": 300
+        },
+        "data": {
+          "type": "EOMLogLoader",
+          "id": "EOMLogLoader",
+          "node": {
+            "template": {
+              "_type": "Component",
+              "code": {
+                "type": "code",
+                "value": "\"\"\"\n① EOM Log Loader - Langflow 1.9.1 Custom Component (신규, 재구성)\n\n업로드된 EOM test log 파일을 읽어 인코딩을 자동 감지하고\n전체 원문 텍스트(Message)를 출력한다.\n\n재구성 의도:\n  기존에는 Log Sampler와 JSON Builder가 각각 파일을 직접 읽었다.\n  파일 읽기(I/O)를 단일 책임 컴포넌트로 분리하여\n    Loader(log_text) ─▶ Sampler        (LLM 패턴 식별용 샘플)\n                     └─▶ JSON Builder   (전체 로그 숫자 추출)\n  으로 명시적으로 연결한다. (파일 이중 읽기 제거, chaining 명확화)\n\n출력:\n  - log_text : 디코딩된 전체 로그 원문 (Message)\n\"\"\"\nfrom pathlib import Path\n\n\ndef read_text_any_encoding(path: str) -> str:\n    \"\"\"UTF-8 우선, 실패 시 chardet 감지(미설치 시 cp949)로 디코딩.\"\"\"\n    raw = Path(path).read_bytes()\n    try:\n        return raw.decode(\"utf-8\")\n    except UnicodeDecodeError:\n        try:\n            import chardet\n\n            enc = chardet.detect(raw)[\"encoding\"] or \"cp949\"\n        except ImportError:\n            enc = \"cp949\"\n        return raw.decode(enc, errors=\"replace\")\n\n\n# ---------------------------------------------------------------\n# Langflow 컴포넌트부\n# ---------------------------------------------------------------\nfrom langflow.custom import Component\nfrom langflow.io import MessageTextInput, Output\nfrom langflow.schema.message import Message\n\n\nclass EOMLogLoader(Component):\n    display_name = \"EOM Log Loader\"\n    description = \"EOM log 파일을 읽어 인코딩 자동 감지 후 전체 원문 텍스트를 출력\"\n    icon = \"file-text\"\n    name = \"EOMLogLoader\"\n\n    inputs = [\n        MessageTextInput(\n            name=\"file_path\",\n            display_name=\"EOM Log File Path\",\n            info=\"Frontend가 tweaks로 전달 (storage/uploads/...)\",\n        ),\n    ]\n\n    outputs = [\n        Output(display_name=\"Log Text\", name=\"log_text\", method=\"load\"),\n    ]\n\n    def load(self) -> Message:\n        text = read_text_any_encoding(self.file_path)\n        self.status = (\n            f\"{Path(self.file_path).name}: {len(text)} chars, \"\n            f\"{text.count(chr(10)) + 1} lines\"\n        )\n        return Message(text=text)\n",
+                "name": "code",
+                "show": true,
+                "advanced": true,
+                "fileTypes": [],
+                "password": false,
+                "dynamic": true,
+                "_input_type": "CodeInput"
+              },
+              "file_path": {
+                "type": "str",
+                "value": "",
+                "name": "file_path",
+                "display_name": "file_path",
+                "info": "storage/uploads/... (tweaks)",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              }
+            },
+            "description": "EOM log 파일을 읽어 인코딩 자동 감지 후 전체 원문 텍스트를 출력",
+            "display_name": "EOM Log Loader",
+            "icon": "file-text",
+            "base_classes": [
+              "Message"
+            ],
+            "outputs": [
+              {
+                "types": [
+                  "Message"
+                ],
+                "selected": "Message",
+                "name": "log_text",
+                "display_name": "Log Text",
+                "method": "load",
+                "value": "__UNDEFINED__",
+                "cache": true,
+                "hidden": false
+              }
+            ],
+            "documentation": "",
+            "beta": false,
+            "edited": false,
+            "official": false
+          }
+        },
+        "width": 320,
+        "height": 400,
+        "selected": false,
+        "dragging": false,
+        "positionAbsolute": {
+          "x": 60,
+          "y": 300
+        }
+      },
+      {
+        "id": "EOMLogSampler",
+        "type": "genericNode",
+        "position": {
+          "x": 440,
+          "y": 120
+        },
+        "data": {
+          "type": "EOMLogSampler",
+          "id": "EOMLogSampler",
+          "node": {
+            "template": {
+              "_type": "Component",
+              "code": {
+                "type": "code",
+                "value": "\"\"\"\n②a EOM Log Sampler - Langflow 1.9.1 Custom Component\n\n전체 로그를 LLM에 넣지 않고, 패턴 식별에 필요한 대표 샘플만 추출한다.\n(하이브리드 방식: LLM은 키워드/정규식 패턴만 식별, 숫자 추출은 Python)\n\n재구성: 파일을 직접 읽지 않고 ① Log Loader의 log_text(Message)를 입력받는다.\n샘플 구성: 앞부분 head_lines줄 + 중간 5줄 + 끝 5줄\n\"\"\"\nfrom langflow.custom import Component\nfrom langflow.io import IntInput, MessageTextInput, Output\nfrom langflow.schema.message import Message\n\n\ndef sample_log(text: str, head_lines: int = 60) -> str:\n    lines = text.splitlines()\n    if len(lines) <= head_lines + 10:\n        return text\n    mid = len(lines) // 2\n    parts = (\n        lines[:head_lines]\n        + [\"... (중략) ...\"]\n        + lines[mid : mid + 5]\n        + [\"... (중략) ...\"]\n        + lines[-5:]\n    )\n    return \"\\n\".join(parts)\n\n\nclass EOMLogSampler(Component):\n    display_name = \"EOM Log Sampler\"\n    description = \"① Loader의 로그 원문에서 LLM 패턴 식별용 샘플 추출\"\n    icon = \"scissors\"\n    name = \"EOMLogSampler\"\n\n    inputs = [\n        MessageTextInput(\n            name=\"log_text\",\n            display_name=\"Log Text\",\n            info=\"① EOM Log Loader의 log_text 출력 연결\",\n        ),\n        IntInput(\n            name=\"head_lines\",\n            display_name=\"Head Lines\",\n            value=60,\n            info=\"샘플에 포함할 앞부분 줄 수\",\n        ),\n    ]\n\n    outputs = [\n        Output(display_name=\"Log Sample\", name=\"log_sample\", method=\"get_sample\"),\n    ]\n\n    def get_sample(self) -> Message:\n        text = self.log_text or \"\"\n        sample = sample_log(text, self.head_lines or 60)\n        self.status = f\"sample: {len(sample)} chars / total: {len(text)} chars\"\n        return Message(text=sample)\n",
+                "name": "code",
+                "show": true,
+                "advanced": true,
+                "fileTypes": [],
+                "password": false,
+                "dynamic": true,
+                "_input_type": "CodeInput"
+              },
+              "log_text": {
+                "type": "str",
+                "value": "",
+                "name": "log_text",
+                "display_name": "log_text",
+                "info": "① Loader의 log_text 연결",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              },
+              "head_lines": {
+                "type": "int",
+                "value": 60,
+                "name": "head_lines",
+                "display_name": "head_lines",
+                "info": "앞부분 줄 수",
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "_input_type": "IntInput"
+              }
+            },
+            "description": "① Loader의 로그 원문에서 LLM 패턴 식별용 샘플 추출",
+            "display_name": "EOM Log Sampler",
+            "icon": "scissors",
+            "base_classes": [
+              "Message"
+            ],
+            "outputs": [
+              {
+                "types": [
+                  "Message"
+                ],
+                "selected": "Message",
+                "name": "log_sample",
+                "display_name": "Log Sample",
+                "method": "get_sample",
+                "value": "__UNDEFINED__",
+                "cache": true,
+                "hidden": false
+              }
+            ],
+            "documentation": "",
+            "beta": false,
+            "edited": false,
+            "official": false
+          }
+        },
+        "width": 320,
+        "height": 400,
+        "selected": false,
+        "dragging": false,
+        "positionAbsolute": {
+          "x": 440,
+          "y": 120
+        }
+      },
+      {
+        "id": "Prompt",
+        "type": "genericNode",
+        "position": {
+          "x": 820,
+          "y": 120
+        },
+        "data": {
+          "type": "Prompt",
+          "id": "Prompt",
+          "node": {
+            "template": {
+              "_type": "Component",
+              "template": {
+                "type": "prompt",
+                "value": "당신은 시리얼 링크 PAM4 EOM(Eye Opening Monitor) 로그 분석 전문가입니다.\n아래 로그 샘플을 분석하여, 전체 로그에서 데이터를 추출할 수 있는 Python 정규식을 작성하세요.\n\n찾아야 할 정보 (키워드가 다르더라도 유사한 의미의 표현을 인식할 것):\n1. voltage step  — 유사 표현 예: voltage, v_step, vertical, amplitude, amp\n2. timing step   — 유사 표현 예: timing, t_step, phase, horizontal, ui_offset\n3. error count   — 유사 표현 예: error_cnt, err, errors, error count, err_cnt\n4. lane 번호     — 유사 표현 예: lane, ln, channel (로그에 없으면 생략)\n5. 축 범위 설정  — 유사 표현 예: TimingMaxSteps, VoltageMaxSteps, max_steps, offset (로그에 없으면 null)\n\n정규식 작성 규칙:\n- data_pattern: 데이터 라인 1줄에 매칭. 반드시 named group 사용:\n  (?P<timing>...), (?P<voltage>...), (?P<error>...) 필수 / (?P<lane>...) 선택\n- config_pattern: 축 범위 헤더에 매칭. named group:\n  (?P<timing_max_steps>...), (?P<timing_max_offset>...),\n  (?P<voltage_max_steps>...), (?P<voltage_max_offset>...)\n  해당 헤더가 로그에 없으면 null\n- default_fill: 측정되지 않았거나 무효를 의미하는 error 값 (일반적으로 63, 판단 불가 시 63)\n\n반드시 아래 JSON 형식으로만 응답하세요. 마크다운 코드블록, 설명, 주석을 모두 금지합니다.\n{{\"config_pattern\": \"...\", \"data_pattern\": \"...\", \"default_fill\": 63}}\n\n로그 샘플:\n{log_sample}\n",
+                "name": "template",
+                "display_name": "Template",
+                "show": true,
+                "_input_type": "PromptInput"
+              },
+              "log_sample": {
+                "type": "str",
+                "value": "",
+                "name": "log_sample",
+                "display_name": "log_sample",
+                "info": "②a Sampler의 log_sample 연결",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              }
+            },
+            "description": "eom_pattern_prompt.txt 템플릿. 변수 {log_sample} ← Sampler 출력",
+            "display_name": "Prompt (Pattern)",
+            "icon": "prompt",
+            "base_classes": [
+              "Message"
+            ],
+            "outputs": [
+              {
+                "types": [
+                  "Message"
+                ],
+                "selected": "Message",
+                "name": "prompt",
+                "display_name": "Prompt Message",
+                "method": "build_prompt",
+                "value": "__UNDEFINED__",
+                "cache": true,
+                "hidden": false
+              }
+            ],
+            "documentation": "",
+            "beta": false,
+            "edited": false,
+            "official": false
+          }
+        },
+        "width": 320,
+        "height": 400,
+        "selected": false,
+        "dragging": false,
+        "positionAbsolute": {
+          "x": 820,
+          "y": 120
+        }
+      },
+      {
+        "id": "LanguageModelComponent",
+        "type": "genericNode",
+        "position": {
+          "x": 1200,
+          "y": 120
+        },
+        "data": {
+          "type": "LanguageModelComponent",
+          "id": "LanguageModelComponent",
+          "node": {
+            "template": {
+              "_type": "Component",
+              "provider": {
+                "type": "str",
+                "value": "Anthropic",
+                "name": "provider",
+                "display_name": "Model Provider",
+                "options": [
+                  "Anthropic",
+                  "OpenAI",
+                  "Ollama"
+                ],
+                "show": true,
+                "_input_type": "DropdownInput"
+              },
+              "model_name": {
+                "type": "str",
+                "value": "claude-3-5-sonnet-latest",
+                "name": "model_name",
+                "display_name": "Model Name",
+                "show": true,
+                "_input_type": "DropdownInput"
+              },
+              "api_key": {
+                "type": "str",
+                "value": "",
+                "name": "api_key",
+                "display_name": "API Key",
+                "password": true,
+                "show": true,
+                "_input_type": "SecretStrInput"
+              },
+              "temperature": {
+                "type": "float",
+                "value": 0.0,
+                "name": "temperature",
+                "display_name": "Temperature",
+                "show": true,
+                "_input_type": "SliderInput"
+              },
+              "input_value": {
+                "type": "str",
+                "value": "",
+                "name": "input_value",
+                "display_name": "input_value",
+                "info": "Prompt 연결",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              }
+            },
+            "description": "패턴 식별 LLM. provider tweak 으로 Claude/OpenAI/Ollama 전환",
+            "display_name": "Language Model",
+            "icon": "brain-circuit",
+            "base_classes": [
+              "Message"
+            ],
+            "outputs": [
+              {
+                "types": [
+                  "Message"
+                ],
+                "selected": "Message",
+                "name": "text_output",
+                "display_name": "Text",
+                "method": "text_response",
+                "value": "__UNDEFINED__",
+                "cache": true,
+                "hidden": false
+              }
+            ],
+            "documentation": "",
+            "beta": false,
+            "edited": false,
+            "official": false
+          }
+        },
+        "width": 320,
+        "height": 400,
+        "selected": false,
+        "dragging": false,
+        "positionAbsolute": {
+          "x": 1200,
+          "y": 120
+        }
+      },
+      {
+        "id": "EOMJsonBuilder",
+        "type": "genericNode",
+        "position": {
+          "x": 1580,
+          "y": 300
+        },
+        "data": {
+          "type": "EOMJsonBuilder",
+          "id": "EOMJsonBuilder",
+          "node": {
+            "template": {
+              "_type": "Component",
+              "code": {
+                "type": "code",
+                "value": "\"\"\"\n③ EOM JSON Builder - Langflow 1.9.1 Custom Component (하이브리드 방식)\n\n② LLM이 식별한 정규식 패턴(JSON)을 받아 Python이 전체 로그에서 숫자를 추출,\nV(row) x T(col) matrix JSON을 생성한다.\n\n참고: eom_final_package_parser.py (CSV 변환 기본 코드)의 로직을 승계\n  - config 헤더: TimingMaxSteps / TimingMaxOffset / VoltageMaxSteps / VoltageMaxOffset\n  - 데이터 라인: lane / timing / voltage / error_cnt\n  - 중복 (t,v) 병합: 63(fill)이 아닌 유효값 우선, 유효값끼리는 작은 값 우선\n  - 누락 셀 기본값: 63\n  - 축: timing -t_max~+t_max (가로), voltage +v_max→-v_max 내림차순 (세로)\n\nLLM 패턴 파싱 실패 시 위 기본(QC 포맷) 패턴으로 fallback.\n\"\"\"\nimport json\nimport re\nfrom datetime import datetime\nfrom pathlib import Path\n\n# ---------------------------------------------------------------\n# 순수 함수부 (Langflow 없이 단독 테스트 가능)\n# ---------------------------------------------------------------\n\n# 참고 코드(QC 포맷) 기반 fallback 패턴\nDEFAULT_CONFIG_PATTERN = (\n    r\"TimingMaxSteps\\s+(?P<timing_max_steps>\\d+)\\s+\"\n    r\"TimingMaxOffset\\s+(?P<timing_max_offset>\\d+)\\s+\"\n    r\"VoltageMaxSteps\\s+(?P<voltage_max_steps>\\d+)\\s+\"\n    r\"VoltageMaxOffset\\s+(?P<voltage_max_offset>\\d+)\"\n)\nDEFAULT_DATA_PATTERN = (\n    r\"lane:\\s*(?P<lane>\\d+)\\s+timing:\\s*(?P<timing>-?\\d+)\\s+\"\n    r\"voltage:\\s*(?P<voltage>-?\\d+)\\s+error_cnt:\\s*(?P<error>\\d+)\"\n)\nDEFAULT_FILL = 63\n\n\ndef parse_llm_patterns(llm_text: str) -> tuple[dict, str]:\n    \"\"\"LLM 응답(JSON 문자열)에서 패턴 추출. 실패 시 fallback.\n\n    Returns: (patterns dict, source: 'llm' | 'fallback')\n    \"\"\"\n    fallback = {\n        \"config_pattern\": DEFAULT_CONFIG_PATTERN,\n        \"data_pattern\": DEFAULT_DATA_PATTERN,\n        \"default_fill\": DEFAULT_FILL,\n    }\n    if not llm_text:\n        return fallback, \"fallback\"\n    # 마크다운 코드펜스 제거 후 첫 { ~ 마지막 } 구간 파싱\n    cleaned = re.sub(r\"```(json)?\", \"\", llm_text).strip()\n    start, end = cleaned.find(\"{\"), cleaned.rfind(\"}\")\n    if start == -1 or end == -1:\n        return fallback, \"fallback\"\n    try:\n        p = json.loads(cleaned[start : end + 1])\n    except json.JSONDecodeError:\n        return fallback, \"fallback\"\n\n    data_pattern = p.get(\"data_pattern\")\n    if not data_pattern:\n        return fallback, \"fallback\"\n    # 필수 named group 검증 + 정규식 컴파일 검증\n    try:\n        compiled = re.compile(data_pattern)\n    except re.error:\n        return fallback, \"fallback\"\n    required = {\"timing\", \"voltage\", \"error\"}\n    if not required.issubset(compiled.groupindex.keys()):\n        return fallback, \"fallback\"\n\n    cfg_pattern = p.get(\"config_pattern\")\n    if cfg_pattern:\n        try:\n            re.compile(cfg_pattern)\n        except re.error:\n            cfg_pattern = None\n\n    return {\n        \"config_pattern\": cfg_pattern,\n        \"data_pattern\": data_pattern,\n        \"default_fill\": int(p.get(\"default_fill\", DEFAULT_FILL)),\n    }, \"llm\"\n\n\ndef extract_lane_data(text: str, patterns: dict) -> tuple[dict, dict]:\n    \"\"\"전체 로그에서 lane별 {(t, v): error} 맵과 config 추출.\"\"\"\n    fill = patterns[\"default_fill\"]\n    config = {}\n    if patterns.get(\"config_pattern\"):\n        m = re.search(patterns[\"config_pattern\"], text)\n        if m:\n            config = {k: int(v) for k, v in m.groupdict().items() if v is not None}\n\n    re_data = re.compile(patterns[\"data_pattern\"])\n    lane_data: dict[int, dict] = {}\n    for line in text.splitlines():\n        m = re_data.search(line)\n        if not m:\n            continue\n        g = m.groupdict()\n        lane = int(g.get(\"lane\") or 0)\n        t, v, val = int(g[\"timing\"]), int(g[\"voltage\"]), int(g[\"error\"])\n        cur = lane_data.setdefault(lane, {})\n        key = (t, v)\n        # 참고 코드의 병합 규칙: fill(63) 아닌 유효값 우선, 더 작은 값 우선\n        if (\n            key not in cur\n            or (cur[key] == fill and val != fill)\n            or (val != fill and val < cur[key])\n        ):\n            cur[key] = val\n    return lane_data, config\n\n\ndef build_axes(lane_data: dict, config: dict) -> tuple[list[int], list[int]]:\n    \"\"\"timing(가로, 오름차순) / voltage(세로, 내림차순) 축 생성.\n\n    config 헤더가 있으면 MaxSteps 기준(-max~+max), 없으면 관측값 min/max 기준.\n    \"\"\"\n    if \"timing_max_steps\" in config and \"voltage_max_steps\" in config:\n        t_max, v_max = config[\"timing_max_steps\"], config[\"voltage_max_steps\"]\n        t_axis = list(range(-t_max, t_max + 1))\n        v_axis = list(range(v_max, -v_max - 1, -1))\n        return t_axis, v_axis\n    all_keys = [k for d in lane_data.values() for k in d.keys()]\n    ts = sorted({t for t, _ in all_keys})\n    vs = sorted({v for _, v in all_keys}, reverse=True)\n    return ts, vs\n\n\ndef build_eom_json(\n    text: str, patterns: dict, pattern_source: str, source_file: str, llm_model: str = \"\"\n) -> dict:\n    lane_data, config = extract_lane_data(text, patterns)\n    if not lane_data:\n        raise ValueError(\n            \"데이터 라인을 하나도 추출하지 못했습니다. \"\n            f\"data_pattern을 확인하세요: {patterns['data_pattern']}\"\n        )\n    t_axis, v_axis = build_axes(lane_data, config)\n    fill = patterns[\"default_fill\"]\n\n    lanes = {}\n    for lane_id in sorted(lane_data.keys()):\n        cur = lane_data[lane_id]\n        matrix = [[cur.get((t, v), fill) for t in t_axis] for v in v_axis]\n        lanes[str(lane_id)] = {\"matrix\": matrix}\n\n    return {\n        \"meta\": {\n            \"source_file\": source_file,\n            \"parsed_at\": datetime.now().isoformat(timespec=\"seconds\"),\n            \"pattern_source\": pattern_source,  # 'llm' | 'fallback'\n            \"llm_model\": llm_model,\n            \"lane_mode\": \"DualLane\" if {0, 1}.issubset(lane_data.keys())\n            else f\"SingleLane {sorted(lane_data.keys())}\",\n        },\n        \"config\": config,\n        \"timing_steps\": t_axis,     # 가로축 (col)\n        \"voltage_steps\": v_axis,    # 세로축 (row, 내림차순)\n        \"default_fill\": fill,\n        \"lanes\": lanes,\n    }\n\n\ndef read_text_any_encoding(path: str) -> str:\n    raw = Path(path).read_bytes()\n    try:\n        return raw.decode(\"utf-8\")\n    except UnicodeDecodeError:\n        try:\n            import chardet\n\n            enc = chardet.detect(raw)[\"encoding\"] or \"cp949\"\n        except ImportError:\n            enc = \"cp949\"\n        return raw.decode(enc, errors=\"replace\")\n\n\n# ---------------------------------------------------------------\n# Langflow 컴포넌트부\n# ---------------------------------------------------------------\nfrom langflow.custom import Component\nfrom langflow.io import MessageTextInput, Output\nfrom langflow.schema import Data\n\n\nclass EOMJsonBuilder(Component):\n    display_name = \"EOM JSON Builder\"\n    description = \"LLM 식별 패턴 + Python 추출로 V(row) x T(col) matrix JSON 생성\"\n    icon = \"braces\"\n    name = \"EOMJsonBuilder\"\n\n    inputs = [\n        MessageTextInput(\n            name=\"llm_patterns\",\n            display_name=\"LLM Pattern Output\",\n            info=\"② Language Model이 반환한 패턴 JSON\",\n        ),\n        MessageTextInput(\n            name=\"log_text\",\n            display_name=\"Log Text\",\n            info=\"① EOM Log Loader의 log_text 출력 연결 (전체 로그 원문)\",\n        ),\n        MessageTextInput(\n            name=\"source_file\",\n            display_name=\"Source File Name\",\n            value=\"\",\n            info=\"원본 로그 파일명 (meta/JSON 파일명용, Frontend가 tweaks로 전달)\",\n        ),\n        MessageTextInput(\n            name=\"output_dir\",\n            display_name=\"JSON Output Dir\",\n            value=\"storage/json\",\n        ),\n        MessageTextInput(\n            name=\"llm_model\",\n            display_name=\"LLM Model Name\",\n            value=\"\",\n            info=\"meta 기록용 (claude/openai/ollama)\",\n        ),\n    ]\n\n    outputs = [\n        Output(display_name=\"EOM JSON\", name=\"eom_json\", method=\"build\"),\n    ]\n\n    def build(self) -> Data:\n        patterns, source = parse_llm_patterns(self.llm_patterns)\n        text = self.log_text or \"\"\n        source_file = self.source_file or \"eom_log.txt\"\n        result = build_eom_json(\n            text, patterns, source, Path(source_file).name, self.llm_model or \"\"\n        )\n\n        out_dir = Path(self.output_dir or \"storage/json\")\n        out_dir.mkdir(parents=True, exist_ok=True)\n        stem = Path(source_file).stem\n        json_path = out_dir / f\"{stem}.json\"\n        json_path.write_text(\n            json.dumps(result, ensure_ascii=False, indent=2), encoding=\"utf-8\"\n        )\n\n        result[\"meta\"][\"json_path\"] = str(json_path)\n        self.status = (\n            f\"pattern={source}, lanes={list(result['lanes'].keys())}, \"\n            f\"grid={len(result['voltage_steps'])}x{len(result['timing_steps'])}\"\n        )\n        return Data(data=result)\n",
+                "name": "code",
+                "show": true,
+                "advanced": true,
+                "fileTypes": [],
+                "password": false,
+                "dynamic": true,
+                "_input_type": "CodeInput"
+              },
+              "llm_patterns": {
+                "type": "str",
+                "value": "",
+                "name": "llm_patterns",
+                "display_name": "llm_patterns",
+                "info": "② LLM text 연결",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              },
+              "log_text": {
+                "type": "str",
+                "value": "",
+                "name": "log_text",
+                "display_name": "log_text",
+                "info": "① Loader의 log_text 연결",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              },
+              "source_file": {
+                "type": "str",
+                "value": "",
+                "name": "source_file",
+                "display_name": "source_file",
+                "info": "원본 파일명 (tweaks)",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              },
+              "output_dir": {
+                "type": "str",
+                "value": "storage/json",
+                "name": "output_dir",
+                "display_name": "output_dir",
+                "info": "",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              },
+              "llm_model": {
+                "type": "str",
+                "value": "",
+                "name": "llm_model",
+                "display_name": "llm_model",
+                "info": "meta 기록용 (tweaks)",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              }
+            },
+            "description": "LLM 패턴 + Python 추출로 V(row)×T(col) matrix JSON 생성 (fallback 포함)",
+            "display_name": "EOM JSON Builder",
+            "icon": "braces",
+            "base_classes": [
+              "Data"
+            ],
+            "outputs": [
+              {
+                "types": [
+                  "Data"
+                ],
+                "selected": "Data",
+                "name": "eom_json",
+                "display_name": "EOM JSON",
+                "method": "build",
+                "value": "__UNDEFINED__",
+                "cache": true,
+                "hidden": false
+              }
+            ],
+            "documentation": "",
+            "beta": false,
+            "edited": false,
+            "official": false
+          }
+        },
+        "width": 320,
+        "height": 400,
+        "selected": false,
+        "dragging": false,
+        "positionAbsolute": {
+          "x": 1580,
+          "y": 300
+        }
+      },
+      {
+        "id": "EOMHeatmapPlotter",
+        "type": "genericNode",
+        "position": {
+          "x": 1960,
+          "y": 120
+        },
+        "data": {
+          "type": "EOMHeatmapPlotter",
+          "id": "EOMHeatmapPlotter",
+          "node": {
+            "template": {
+              "_type": "Component",
+              "code": {
+                "type": "code",
+                "value": "\"\"\"\n④ EOM Heatmap Plotter - Langflow 1.9.1 Custom Component\n\n③ JSON Builder의 matrix JSON을 받아 lane별 Eye Diagram PNG 생성.\n참고 코드(PAM4_eye_diagram_converter.py) 시각화 로직 전체 승계:\n  - error=0 파란색 / ≥1 빨간색, 셀 격자선, 컬러바(0~63)\n  - PAM4 3-eye 마름모 마스크(±0.12UI × ±25mV) + 중심 '+' 마커\n  - 우상단 마진 박스 / 좌하단 파라미터 박스, 다크 배경\n\"\"\"\nimport sys\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).parent))  # 사이드 모듈 import 경로\nfrom eom_eye_core import plot_lane_png  # noqa: E402\n\nfrom langflow.custom import Component\nfrom langflow.io import DataInput, IntInput, MessageTextInput, Output\nfrom langflow.schema import Data\n\n\nclass EOMHeatmapPlotter(Component):\n    display_name = \"EOM Heatmap Plotter\"\n    description = \"matrix JSON을 lane별 Eye Diagram PNG로 저장 (3-eye 마스크/마진 박스 포함)\"\n    icon = \"image\"\n    name = \"EOMHeatmapPlotter\"\n\n    inputs = [\n        DataInput(name=\"eom_json\", display_name=\"EOM JSON\"),\n        MessageTextInput(\n            name=\"output_dir\",\n            display_name=\"Image Output Dir\",\n            value=\"storage/images\",\n        ),\n        IntInput(name=\"dpi\", display_name=\"DPI\", value=150),\n    ]\n\n    outputs = [\n        Output(display_name=\"Plot Result\", name=\"plot_result\", method=\"plot\"),\n    ]\n\n    def plot(self) -> Data:\n        j = self.eom_json.data if hasattr(self.eom_json, \"data\") else self.eom_json\n        out_dir = Path(self.output_dir or \"storage/images\")\n        out_dir.mkdir(parents=True, exist_ok=True)\n        stem = Path(j[\"meta\"][\"source_file\"]).stem\n\n        images, margins_all = {}, {}\n        for lane_id, lane in j[\"lanes\"].items():\n            lane_name = f\"Lane{lane_id}\"\n            out_path = out_dir / f\"{stem}_{lane_name}.png\"\n            margins = plot_lane_png(\n                lane[\"matrix\"], j[\"timing_steps\"], j[\"voltage_steps\"],\n                j.get(\"config\", {}), lane_name, str(out_path),\n                dpi=self.dpi or 150,\n            )\n            images[lane_name] = str(out_path)\n            margins_all[lane_name] = margins\n\n        self.status = f\"images: {list(images.values())}\"\n        return Data(data={\n            \"images\": images,          # {\"Lane0\": \"storage/images/....png\", ...}\n            \"margins\": margins_all,    # 이미지에 표기된 마진 (참고용)\n            \"source_file\": j[\"meta\"][\"source_file\"],\n        })\n",
+                "name": "code",
+                "show": true,
+                "advanced": true,
+                "fileTypes": [],
+                "password": false,
+                "dynamic": true,
+                "_input_type": "CodeInput"
+              },
+              "eom_json": {
+                "type": "other",
+                "value": "",
+                "name": "eom_json",
+                "display_name": "eom_json",
+                "info": "③ JSON Builder 연결",
+                "input_types": [
+                  "Data"
+                ],
+                "show": true,
+                "required": true,
+                "advanced": false,
+                "_input_type": "DataInput"
+              },
+              "output_dir": {
+                "type": "str",
+                "value": "storage/images",
+                "name": "output_dir",
+                "display_name": "output_dir",
+                "info": "",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              },
+              "dpi": {
+                "type": "int",
+                "value": 150,
+                "name": "dpi",
+                "display_name": "dpi",
+                "info": "",
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "_input_type": "IntInput"
+              }
+            },
+            "description": "matrix JSON → lane별 Eye Diagram PNG (3-eye 마스크/마진 박스)",
+            "display_name": "EOM Heatmap Plotter",
+            "icon": "image",
+            "base_classes": [
+              "Data"
+            ],
+            "outputs": [
+              {
+                "types": [
+                  "Data"
+                ],
+                "selected": "Data",
+                "name": "plot_result",
+                "display_name": "Plot Result",
+                "method": "plot",
+                "value": "__UNDEFINED__",
+                "cache": true,
+                "hidden": false
+              }
+            ],
+            "documentation": "",
+            "beta": false,
+            "edited": false,
+            "official": false
+          }
+        },
+        "width": 320,
+        "height": 400,
+        "selected": false,
+        "dragging": false,
+        "positionAbsolute": {
+          "x": 1960,
+          "y": 120
+        }
+      },
+      {
+        "id": "EOMMarginCalculator",
+        "type": "genericNode",
+        "position": {
+          "x": 1960,
+          "y": 480
+        },
+        "data": {
+          "type": "EOMMarginCalculator",
+          "id": "EOMMarginCalculator",
+          "node": {
+            "template": {
+              "_type": "Component",
+              "code": {
+                "type": "code",
+                "value": "\"\"\"\n⑤ EOM Margin Calculator - Langflow 1.9.1 Custom Component\n\nmatrix JSON에서 lane별 PAM4 3-eye(Upper/Middle/Lower) margin 계산.\n참고 코드 알고리즘 승계:\n  - 중심: 영역 내 최장 연속-0 행 → cy, 구간 중앙 → cx\n  - Width(UI): 기준 행 최장 연속-0 구간 길이\n  - Height(mV): cx 기준 열에서 cy 포함 연속-0 클러스터 (gap>1.5step 분리)\nFail 기준(참고 코드 분포 차트): Width ≤ 0.24 UI 또는 Height ≤ 50 mV\n\"\"\"\nimport sys\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).parent))\nimport numpy as np  # noqa: E402\nfrom eom_eye_core import (  # noqa: E402\n    calc_lane_margins, calc_x_coords, calc_y_coords, resolve_params,\n)\n\nfrom langflow.custom import Component\nfrom langflow.io import DataInput, FloatInput, Output\nfrom langflow.schema import Data\n\n\nclass EOMMarginCalculator(Component):\n    display_name = \"EOM Margin Calculator\"\n    description = \"lane별 3-eye(Upper/Middle/Lower) Width/Height margin 계산\"\n    icon = \"ruler\"\n    name = \"EOMMarginCalculator\"\n\n    inputs = [\n        DataInput(name=\"eom_json\", display_name=\"EOM JSON\"),\n        FloatInput(name=\"fail_width_ui\", display_name=\"Fail Width (UI)\", value=0.24),\n        FloatInput(name=\"fail_height_mv\", display_name=\"Fail Height (mV)\", value=50.0),\n    ]\n\n    outputs = [\n        Output(display_name=\"Margins\", name=\"margins\", method=\"calculate\"),\n    ]\n\n    def calculate(self) -> Data:\n        j = self.eom_json.data if hasattr(self.eom_json, \"data\") else self.eom_json\n        config = j.get(\"config\", {})\n        t_steps, v_steps = j[\"timing_steps\"], j[\"voltage_steps\"]\n        params, complete = resolve_params(config, t_steps, v_steps)\n        x_coords = calc_x_coords(t_steps, params)\n        y_coords = calc_y_coords(v_steps, params)\n\n        fw = self.fail_width_ui or 0.24\n        fh = self.fail_height_mv or 50.0\n\n        lanes_out, overall_pass = {}, True\n        for lane_id, lane in j[\"lanes\"].items():\n            data = np.array(lane[\"matrix\"], dtype=float)\n            margins = calc_lane_margins(data, x_coords, y_coords)\n            for m in margins:\n                m[\"pass\"] = bool(m[\"width_ui\"] > fw and m[\"height_mv\"] > fh)\n                overall_pass &= m[\"pass\"]\n            lanes_out[f\"Lane{lane_id}\"] = margins\n\n        result = {\n            \"source_file\": j[\"meta\"][\"source_file\"],\n            \"llm_model\": j[\"meta\"].get(\"llm_model\", \"\"),\n            \"json_path\": j[\"meta\"].get(\"json_path\", \"\"),\n            \"params\": params,\n            \"params_complete\": complete,  # False면 기본 Offset으로 환산됨\n            \"fail_criteria\": {\"width_ui\": fw, \"height_mv\": fh},\n            \"overall_pass\": overall_pass,\n            \"lanes\": lanes_out,\n            # 예: {\"Lane0\": [{\"eye\":\"Upper\",\"cx\":..,\"cy\":..,\n            #                 \"width_ui\":..,\"height_mv\":..,\"pass\":true}, x3]}\n        }\n        self.status = f\"overall_pass={overall_pass}, lanes={list(lanes_out.keys())}\"\n        return Data(data=result)\n",
+                "name": "code",
+                "show": true,
+                "advanced": true,
+                "fileTypes": [],
+                "password": false,
+                "dynamic": true,
+                "_input_type": "CodeInput"
+              },
+              "eom_json": {
+                "type": "other",
+                "value": "",
+                "name": "eom_json",
+                "display_name": "eom_json",
+                "info": "③ JSON Builder 연결",
+                "input_types": [
+                  "Data"
+                ],
+                "show": true,
+                "required": true,
+                "advanced": false,
+                "_input_type": "DataInput"
+              },
+              "fail_width_ui": {
+                "type": "float",
+                "value": 0.24,
+                "name": "fail_width_ui",
+                "display_name": "fail_width_ui",
+                "info": "",
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "_input_type": "FloatInput"
+              },
+              "fail_height_mv": {
+                "type": "float",
+                "value": 50.0,
+                "name": "fail_height_mv",
+                "display_name": "fail_height_mv",
+                "info": "",
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "_input_type": "FloatInput"
+              }
+            },
+            "description": "lane별 3-eye Width/Height margin + Pass/Fail 계산",
+            "display_name": "EOM Margin Calculator",
+            "icon": "ruler",
+            "base_classes": [
+              "Data"
+            ],
+            "outputs": [
+              {
+                "types": [
+                  "Data"
+                ],
+                "selected": "Data",
+                "name": "margins",
+                "display_name": "Margins",
+                "method": "calculate",
+                "value": "__UNDEFINED__",
+                "cache": true,
+                "hidden": false
+              }
+            ],
+            "documentation": "",
+            "beta": false,
+            "edited": false,
+            "official": false
+          }
+        },
+        "width": 320,
+        "height": 400,
+        "selected": false,
+        "dragging": false,
+        "positionAbsolute": {
+          "x": 1960,
+          "y": 480
+        }
+      },
+      {
+        "id": "EOMDbWriter",
+        "type": "genericNode",
+        "position": {
+          "x": 2340,
+          "y": 300
+        },
+        "data": {
+          "type": "EOMDbWriter",
+          "id": "EOMDbWriter",
+          "node": {
+            "template": {
+              "_type": "Component",
+              "code": {
+                "type": "code",
+                "value": "\"\"\"\n⑥ EOM DB Writer - Langflow 1.9.1 Custom Component\n\n⑤ Margin Calculator 결과(+ ④ 이미지 경로)를 SQLite에 INSERT.\n- 연결: SQLAlchemy URL (기본 sqlite:///db/eom_results.db)\n  → PostgreSQL 등으로 확장 시 URL만 교체\n- 테이블: db/schema.sql 의 eom_results (lane × 3-eye, run_id 그룹핑)\n- 테이블이 없으면 자동 생성 (idempotent)\n\"\"\"\nimport json\nfrom datetime import datetime\nfrom pathlib import Path\n\n# ---------------------------------------------------------------\n# 순수 함수부 (단독 테스트 가능)\n# ---------------------------------------------------------------\nSCHEMA_SQL = \"\"\"\nCREATE TABLE IF NOT EXISTS eom_results (\n    id              INTEGER PRIMARY KEY AUTOINCREMENT,\n    run_id          TEXT NOT NULL,\n    filename        TEXT NOT NULL,\n    model           TEXT,\n    json_path       TEXT,\n    image_path      TEXT,\n    lane            TEXT NOT NULL,\n    eye             TEXT NOT NULL,\n    center_x_ui     REAL,\n    center_y_mv     REAL,\n    width_ui        REAL,\n    height_mv       REAL,\n    pass            INTEGER,\n    overall_pass    INTEGER,\n    params_complete INTEGER,\n    created_at      TEXT DEFAULT (datetime('now', 'localtime'))\n);\n\"\"\"\nINDEX_SQL = [\n    \"CREATE INDEX IF NOT EXISTS idx_eom_results_run  ON eom_results(run_id);\",\n    \"CREATE INDEX IF NOT EXISTS idx_eom_results_file ON eom_results(filename);\",\n]\nINSERT_SQL = \"\"\"\nINSERT INTO eom_results\n    (run_id, filename, model, json_path, image_path, lane, eye,\n     center_x_ui, center_y_mv, width_ui, height_mv,\n     pass, overall_pass, params_complete)\nVALUES\n    (:run_id, :filename, :model, :json_path, :image_path, :lane, :eye,\n     :cx, :cy, :width_ui, :height_mv,\n     :pass, :overall_pass, :params_complete)\n\"\"\"\n\n\ndef build_rows(margins: dict, images: dict | None) -> list[dict]:\n    \"\"\"⑤ margins Data(+④ images)를 INSERT 파라미터 행 목록으로 변환.\"\"\"\n    images = images or {}\n    filename = margins[\"source_file\"]\n    run_id = f\"{Path(filename).stem}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}\"\n    rows = []\n    for lane_name, eyes in margins[\"lanes\"].items():\n        for m in eyes:\n            rows.append({\n                \"run_id\": run_id,\n                \"filename\": filename,\n                \"model\": margins.get(\"llm_model\", \"\"),\n                \"json_path\": margins.get(\"json_path\", \"\"),\n                \"image_path\": images.get(lane_name, \"\"),\n                \"lane\": lane_name,\n                \"eye\": m[\"eye\"],\n                \"cx\": m[\"cx\"],\n                \"cy\": m[\"cy\"],\n                \"width_ui\": m[\"width_ui\"],\n                \"height_mv\": m[\"height_mv\"],\n                \"pass\": int(m.get(\"pass\", False)),\n                \"overall_pass\": int(margins.get(\"overall_pass\", False)),\n                \"params_complete\": int(margins.get(\"params_complete\", True)),\n            })\n    return rows\n\n\ndef insert_margins(db_url: str, margins: dict, images: dict | None = None) -> dict:\n    \"\"\"스키마 보장 후 lane × 3-eye 행 INSERT. Returns 요약 dict.\n\n    SQLAlchemy 사용(Langflow 기본 포함). 미설치 + sqlite URL이면\n    표준 라이브러리 sqlite3로 자동 fallback.\n    \"\"\"\n    # sqlite 파일 디렉터리 보장\n    if db_url.startswith(\"sqlite:///\"):\n        Path(db_url.removeprefix(\"sqlite:///\")).parent.mkdir(\n            parents=True, exist_ok=True\n        )\n\n    rows = build_rows(margins, images)\n    try:\n        from sqlalchemy import create_engine, text\n\n        engine = create_engine(db_url)\n        with engine.begin() as conn:\n            conn.execute(text(SCHEMA_SQL))\n            for stmt in INDEX_SQL:\n                conn.execute(text(stmt))\n            conn.execute(text(INSERT_SQL), rows)\n        engine.dispose()\n    except ImportError:\n        if not db_url.startswith(\"sqlite:///\"):\n            raise\n        import sqlite3\n\n        con = sqlite3.connect(db_url.removeprefix(\"sqlite:///\"))\n        try:\n            con.executescript(SCHEMA_SQL + \"\\n\".join(INDEX_SQL))\n            con.executemany(INSERT_SQL, rows)  # :name 스타일 그대로 지원\n            con.commit()\n        finally:\n            con.close()\n    return {\n        \"run_id\": rows[0][\"run_id\"],\n        \"inserted_rows\": len(rows),\n        \"db_url\": db_url,\n        \"overall_pass\": bool(rows[0][\"overall_pass\"]),\n    }\n\n\n# ---------------------------------------------------------------\n# Langflow 컴포넌트부\n# ---------------------------------------------------------------\nfrom langflow.custom import Component\nfrom langflow.io import DataInput, MessageTextInput, Output\nfrom langflow.schema import Data\n\n\nclass EOMDbWriter(Component):\n    display_name = \"EOM DB Writer\"\n    description = \"lane × 3-eye margin 결과를 eom_results 테이블에 INSERT\"\n    icon = \"database\"\n    name = \"EOMDbWriter\"\n\n    inputs = [\n        DataInput(name=\"margins\", display_name=\"Margins (⑤ 출력)\"),\n        DataInput(\n            name=\"plot_result\",\n            display_name=\"Plot Result (④ 출력, 이미지 경로용)\",\n            required=False,\n        ),\n        MessageTextInput(\n            name=\"db_url\",\n            display_name=\"Database URL\",\n            value=\"sqlite:///db/eom_results.db\",\n            info=\"SQLAlchemy URL. PostgreSQL 확장 시 URL만 교체\",\n        ),\n    ]\n\n    outputs = [\n        Output(display_name=\"Insert Result\", name=\"result\", method=\"write\"),\n    ]\n\n    def write(self) -> Data:\n        margins = (\n            self.margins.data if hasattr(self.margins, \"data\") else self.margins\n        )\n        images = None\n        if self.plot_result is not None:\n            pr = (\n                self.plot_result.data\n                if hasattr(self.plot_result, \"data\")\n                else self.plot_result\n            )\n            images = pr.get(\"images\")\n\n        summary = insert_margins(\n            self.db_url or \"sqlite:///db/eom_results.db\", margins, images\n        )\n        self.status = json.dumps(summary, ensure_ascii=False)\n        return Data(data=summary)\n",
+                "name": "code",
+                "show": true,
+                "advanced": true,
+                "fileTypes": [],
+                "password": false,
+                "dynamic": true,
+                "_input_type": "CodeInput"
+              },
+              "margins": {
+                "type": "other",
+                "value": "",
+                "name": "margins",
+                "display_name": "margins",
+                "info": "⑤ Margin Calculator 연결",
+                "input_types": [
+                  "Data"
+                ],
+                "show": true,
+                "required": true,
+                "advanced": false,
+                "_input_type": "DataInput"
+              },
+              "plot_result": {
+                "type": "other",
+                "value": "",
+                "name": "plot_result",
+                "display_name": "plot_result",
+                "info": "④ Heatmap Plotter 연결(이미지 경로)",
+                "input_types": [
+                  "Data"
+                ],
+                "show": true,
+                "required": true,
+                "advanced": false,
+                "_input_type": "DataInput"
+              },
+              "db_url": {
+                "type": "str",
+                "value": "sqlite:///db/eom_results.db",
+                "name": "db_url",
+                "display_name": "db_url",
+                "info": "",
+                "input_types": [
+                  "Message"
+                ],
+                "show": true,
+                "required": false,
+                "advanced": false,
+                "list": false,
+                "_input_type": "MessageTextInput"
+              }
+            },
+            "description": "lane × 3-eye margin 결과를 eom_results 테이블에 INSERT",
+            "display_name": "EOM DB Writer",
+            "icon": "database",
+            "base_classes": [
+              "Data"
+            ],
+            "outputs": [
+              {
+                "types": [
+                  "Data"
+                ],
+                "selected": "Data",
+                "name": "result",
+                "display_name": "Insert Result",
+                "method": "write",
+                "value": "__UNDEFINED__",
+                "cache": true,
+                "hidden": false
+              }
+            ],
+            "documentation": "",
+            "beta": false,
+            "edited": false,
+            "official": false
+          }
+        },
+        "width": 320,
+        "height": 400,
+        "selected": false,
+        "dragging": false,
+        "positionAbsolute": {
+          "x": 2340,
+          "y": 300
+        }
+      }
+    ],
+    "edges": [
+      {
+        "source": "EOMLogLoader",
+        "target": "EOMLogSampler",
+        "sourceHandle": "{œdataTypeœ:œEOMLogLoaderœ,œidœ:œEOMLogLoaderœ,œnameœ:œlog_textœ,œoutput_typesœ:[œMessageœ]}",
+        "targetHandle": "{œfieldNameœ:œlog_textœ,œidœ:œEOMLogSamplerœ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "EOMLogLoader",
+            "id": "EOMLogLoader",
+            "name": "log_text",
+            "output_types": [
+              "Message"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "log_text",
+            "id": "EOMLogSampler",
+            "inputTypes": [
+              "Message"
+            ],
+            "type": "str"
+          }
+        },
+        "id": "xy-edge__EOMLogLoader{œdataTypeœ:œEOMLogLoaderœ,œidœ:œEOMLogLoaderœ,œnameœ:œlog_textœ,œoutput_typesœ:[œMessageœ]}-EOMLogSampler{œfieldNameœ:œlog_textœ,œidœ:œEOMLogSamplerœ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+        "animated": false,
+        "className": "",
+        "selected": false
+      },
+      {
+        "source": "EOMLogLoader",
+        "target": "EOMJsonBuilder",
+        "sourceHandle": "{œdataTypeœ:œEOMLogLoaderœ,œidœ:œEOMLogLoaderœ,œnameœ:œlog_textœ,œoutput_typesœ:[œMessageœ]}",
+        "targetHandle": "{œfieldNameœ:œlog_textœ,œidœ:œEOMJsonBuilderœ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "EOMLogLoader",
+            "id": "EOMLogLoader",
+            "name": "log_text",
+            "output_types": [
+              "Message"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "log_text",
+            "id": "EOMJsonBuilder",
+            "inputTypes": [
+              "Message"
+            ],
+            "type": "str"
+          }
+        },
+        "id": "xy-edge__EOMLogLoader{œdataTypeœ:œEOMLogLoaderœ,œidœ:œEOMLogLoaderœ,œnameœ:œlog_textœ,œoutput_typesœ:[œMessageœ]}-EOMJsonBuilder{œfieldNameœ:œlog_textœ,œidœ:œEOMJsonBuilderœ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+        "animated": false,
+        "className": "",
+        "selected": false
+      },
+      {
+        "source": "EOMLogSampler",
+        "target": "Prompt",
+        "sourceHandle": "{œdataTypeœ:œEOMLogSamplerœ,œidœ:œEOMLogSamplerœ,œnameœ:œlog_sampleœ,œoutput_typesœ:[œMessageœ]}",
+        "targetHandle": "{œfieldNameœ:œlog_sampleœ,œidœ:œPromptœ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "EOMLogSampler",
+            "id": "EOMLogSampler",
+            "name": "log_sample",
+            "output_types": [
+              "Message"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "log_sample",
+            "id": "Prompt",
+            "inputTypes": [
+              "Message"
+            ],
+            "type": "str"
+          }
+        },
+        "id": "xy-edge__EOMLogSampler{œdataTypeœ:œEOMLogSamplerœ,œidœ:œEOMLogSamplerœ,œnameœ:œlog_sampleœ,œoutput_typesœ:[œMessageœ]}-Prompt{œfieldNameœ:œlog_sampleœ,œidœ:œPromptœ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+        "animated": false,
+        "className": "",
+        "selected": false
+      },
+      {
+        "source": "Prompt",
+        "target": "LanguageModelComponent",
+        "sourceHandle": "{œdataTypeœ:œPromptœ,œidœ:œPromptœ,œnameœ:œpromptœ,œoutput_typesœ:[œMessageœ]}",
+        "targetHandle": "{œfieldNameœ:œinput_valueœ,œidœ:œLanguageModelComponentœ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "Prompt",
+            "id": "Prompt",
+            "name": "prompt",
+            "output_types": [
+              "Message"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "input_value",
+            "id": "LanguageModelComponent",
+            "inputTypes": [
+              "Message"
+            ],
+            "type": "str"
+          }
+        },
+        "id": "xy-edge__Prompt{œdataTypeœ:œPromptœ,œidœ:œPromptœ,œnameœ:œpromptœ,œoutput_typesœ:[œMessageœ]}-LanguageModelComponent{œfieldNameœ:œinput_valueœ,œidœ:œLanguageModelComponentœ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+        "animated": false,
+        "className": "",
+        "selected": false
+      },
+      {
+        "source": "LanguageModelComponent",
+        "target": "EOMJsonBuilder",
+        "sourceHandle": "{œdataTypeœ:œLanguageModelComponentœ,œidœ:œLanguageModelComponentœ,œnameœ:œtext_outputœ,œoutput_typesœ:[œMessageœ]}",
+        "targetHandle": "{œfieldNameœ:œllm_patternsœ,œidœ:œEOMJsonBuilderœ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "LanguageModelComponent",
+            "id": "LanguageModelComponent",
+            "name": "text_output",
+            "output_types": [
+              "Message"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "llm_patterns",
+            "id": "EOMJsonBuilder",
+            "inputTypes": [
+              "Message"
+            ],
+            "type": "str"
+          }
+        },
+        "id": "xy-edge__LanguageModelComponent{œdataTypeœ:œLanguageModelComponentœ,œidœ:œLanguageModelComponentœ,œnameœ:œtext_outputœ,œoutput_typesœ:[œMessageœ]}-EOMJsonBuilder{œfieldNameœ:œllm_patternsœ,œidœ:œEOMJsonBuilderœ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+        "animated": false,
+        "className": "",
+        "selected": false
+      },
+      {
+        "source": "EOMJsonBuilder",
+        "target": "EOMHeatmapPlotter",
+        "sourceHandle": "{œdataTypeœ:œEOMJsonBuilderœ,œidœ:œEOMJsonBuilderœ,œnameœ:œeom_jsonœ,œoutput_typesœ:[œDataœ]}",
+        "targetHandle": "{œfieldNameœ:œeom_jsonœ,œidœ:œEOMHeatmapPlotterœ,œinputTypesœ:[œDataœ],œtypeœ:œotherœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "EOMJsonBuilder",
+            "id": "EOMJsonBuilder",
+            "name": "eom_json",
+            "output_types": [
+              "Data"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "eom_json",
+            "id": "EOMHeatmapPlotter",
+            "inputTypes": [
+              "Data"
+            ],
+            "type": "other"
+          }
+        },
+        "id": "xy-edge__EOMJsonBuilder{œdataTypeœ:œEOMJsonBuilderœ,œidœ:œEOMJsonBuilderœ,œnameœ:œeom_jsonœ,œoutput_typesœ:[œDataœ]}-EOMHeatmapPlotter{œfieldNameœ:œeom_jsonœ,œidœ:œEOMHeatmapPlotterœ,œinputTypesœ:[œDataœ],œtypeœ:œotherœ}",
+        "animated": false,
+        "className": "",
+        "selected": false
+      },
+      {
+        "source": "EOMJsonBuilder",
+        "target": "EOMMarginCalculator",
+        "sourceHandle": "{œdataTypeœ:œEOMJsonBuilderœ,œidœ:œEOMJsonBuilderœ,œnameœ:œeom_jsonœ,œoutput_typesœ:[œDataœ]}",
+        "targetHandle": "{œfieldNameœ:œeom_jsonœ,œidœ:œEOMMarginCalculatorœ,œinputTypesœ:[œDataœ],œtypeœ:œotherœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "EOMJsonBuilder",
+            "id": "EOMJsonBuilder",
+            "name": "eom_json",
+            "output_types": [
+              "Data"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "eom_json",
+            "id": "EOMMarginCalculator",
+            "inputTypes": [
+              "Data"
+            ],
+            "type": "other"
+          }
+        },
+        "id": "xy-edge__EOMJsonBuilder{œdataTypeœ:œEOMJsonBuilderœ,œidœ:œEOMJsonBuilderœ,œnameœ:œeom_jsonœ,œoutput_typesœ:[œDataœ]}-EOMMarginCalculator{œfieldNameœ:œeom_jsonœ,œidœ:œEOMMarginCalculatorœ,œinputTypesœ:[œDataœ],œtypeœ:œotherœ}",
+        "animated": false,
+        "className": "",
+        "selected": false
+      },
+      {
+        "source": "EOMHeatmapPlotter",
+        "target": "EOMDbWriter",
+        "sourceHandle": "{œdataTypeœ:œEOMHeatmapPlotterœ,œidœ:œEOMHeatmapPlotterœ,œnameœ:œplot_resultœ,œoutput_typesœ:[œDataœ]}",
+        "targetHandle": "{œfieldNameœ:œplot_resultœ,œidœ:œEOMDbWriterœ,œinputTypesœ:[œDataœ],œtypeœ:œotherœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "EOMHeatmapPlotter",
+            "id": "EOMHeatmapPlotter",
+            "name": "plot_result",
+            "output_types": [
+              "Data"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "plot_result",
+            "id": "EOMDbWriter",
+            "inputTypes": [
+              "Data"
+            ],
+            "type": "other"
+          }
+        },
+        "id": "xy-edge__EOMHeatmapPlotter{œdataTypeœ:œEOMHeatmapPlotterœ,œidœ:œEOMHeatmapPlotterœ,œnameœ:œplot_resultœ,œoutput_typesœ:[œDataœ]}-EOMDbWriter{œfieldNameœ:œplot_resultœ,œidœ:œEOMDbWriterœ,œinputTypesœ:[œDataœ],œtypeœ:œotherœ}",
+        "animated": false,
+        "className": "",
+        "selected": false
+      },
+      {
+        "source": "EOMMarginCalculator",
+        "target": "EOMDbWriter",
+        "sourceHandle": "{œdataTypeœ:œEOMMarginCalculatorœ,œidœ:œEOMMarginCalculatorœ,œnameœ:œmarginsœ,œoutput_typesœ:[œDataœ]}",
+        "targetHandle": "{œfieldNameœ:œmarginsœ,œidœ:œEOMDbWriterœ,œinputTypesœ:[œDataœ],œtypeœ:œotherœ}",
+        "data": {
+          "sourceHandle": {
+            "dataType": "EOMMarginCalculator",
+            "id": "EOMMarginCalculator",
+            "name": "margins",
+            "output_types": [
+              "Data"
+            ]
+          },
+          "targetHandle": {
+            "fieldName": "margins",
+            "id": "EOMDbWriter",
+            "inputTypes": [
+              "Data"
+            ],
+            "type": "other"
+          }
+        },
+        "id": "xy-edge__EOMMarginCalculator{œdataTypeœ:œEOMMarginCalculatorœ,œidœ:œEOMMarginCalculatorœ,œnameœ:œmarginsœ,œoutput_typesœ:[œDataœ]}-EOMDbWriter{œfieldNameœ:œmarginsœ,œidœ:œEOMDbWriterœ,œinputTypesœ:[œDataœ],œtypeœ:œotherœ}",
+        "animated": false,
+        "className": "",
+        "selected": false
+      }
+    ],
+    "viewport": {
+      "x": 0,
+      "y": 0,
+      "zoom": 0.6
+    }
+  },
+  "is_component": false,
+  "endpoint_name": null
+}

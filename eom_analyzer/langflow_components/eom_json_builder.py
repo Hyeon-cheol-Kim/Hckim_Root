@@ -200,9 +200,15 @@ class EOMJsonBuilder(Component):
             info="② Language Model이 반환한 패턴 JSON",
         ),
         MessageTextInput(
-            name="file_path",
-            display_name="EOM Log File Path",
-            info="②a Sampler와 동일한 파일 경로 (tweaks로 전달)",
+            name="log_text",
+            display_name="Log Text",
+            info="① EOM Log Loader의 log_text 출력 연결 (전체 로그 원문)",
+        ),
+        MessageTextInput(
+            name="source_file",
+            display_name="Source File Name",
+            value="",
+            info="원본 로그 파일명 (meta/JSON 파일명용, Frontend가 tweaks로 전달)",
         ),
         MessageTextInput(
             name="output_dir",
@@ -223,14 +229,15 @@ class EOMJsonBuilder(Component):
 
     def build(self) -> Data:
         patterns, source = parse_llm_patterns(self.llm_patterns)
-        text = read_text_any_encoding(self.file_path)
+        text = self.log_text or ""
+        source_file = self.source_file or "eom_log.txt"
         result = build_eom_json(
-            text, patterns, source, Path(self.file_path).name, self.llm_model or ""
+            text, patterns, source, Path(source_file).name, self.llm_model or ""
         )
 
         out_dir = Path(self.output_dir or "storage/json")
         out_dir.mkdir(parents=True, exist_ok=True)
-        stem = Path(self.file_path).stem
+        stem = Path(source_file).stem
         json_path = out_dir / f"{stem}.json"
         json_path.write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
