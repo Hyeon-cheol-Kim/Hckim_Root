@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block title %}DB 분석 — PAM4 EOM Agent{% endblock %}
+{% block crumb %}SCREEN 02 · DB 분석{% endblock %}
+{% block heading %}저장된 결과를 검색 · 추세 · 비교{% endblock %}
+{% block head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+{% block actions %}<a class="btn ghost" href="/analysis/export{{ query_string }}">↥ 내보내기</a>{% endblock %}
+
+{% block body %}
+<!-- 검색 / 필터 -->
+<div class="card" style="margin-bottom:18px">
+  <form method="get" action="/analysis"
+        style="display:grid; grid-template-columns:2fr 1fr 1fr auto; gap:10px; align-items:end">
+    <div><label>검색 (파일명)</label>
+      <input type="text" name="filename" value="{{ f_filename }}" placeholder="lane, gear, platform, date …"></div>
+    <div><label>Lane</label>
+      <select name="lane">
+        <option value="">전체</option>
+        {% for l in ["Lane0","Lane1","Lane2"] %}
+        <option value="{{ l }}" {{ 'selected' if f_lane==l }}>{{ l }}</option>{% endfor %}
+      </select></div>
+    <div><label>Eye</label>
+      <select name="eye">
+        <option value="">전체</option>
+        {% for e in ["Upper","Middle","Lower"] %}
+        <option value="{{ e }}" {{ 'selected' if f_eye==e }}>{{ e }}</option>{% endfor %}
+      </select></div>
+    <div><button type="submit">조회</button></div>
+  </form>
+</div>
+
+<div class="grid cols-2" style="margin-bottom:18px">
+  <!-- 변환 결과 테이블 -->
+  <div class="card">
+    <h2>변환 결과</h2>
+    <div style="max-height:320px; overflow:auto">
+      <table>
+        <thead><tr><th>Run</th><th>파일</th><th>Lane</th><th>Eye</th><th>T-mgn</th><th>V-mgn</th><th>상태</th></tr></thead>
+        <tbody>
+        {% for r in rows %}
+          <tr class="{{ 'row-fail' if not r['pass'] }}">
+            <td style="font-size:11px">{{ r.run_id[-15:] }}</td>
+            <td>{{ r.filename }}</td>
+            <td>{{ r.lane }}</td><td>{{ r.eye }}</td>
+            <td>{{ "%.2f"|format(r.width_ui) }}</td>
+            <td>{{ "%.0f"|format(r.height_mv) }}</td>
+            <td class="{{ 'pass' if r['pass'] else 'fail' }}">{{ 'PASS' if r['pass'] else 'FAIL' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7" class="muted">조건에 맞는 결과가 없습니다</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 차트 (타입 선택) -->
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px">
+      <h2 style="margin:0">차트</h2>
+      <div class="seg" id="chartSeg">
+        <label><input type="radio" name="charttype" value="scatter" checked>scatter</label>
+        <label><input type="radio" name="charttype" value="box">box</label>
+        <label><input type="radio" name="charttype" value="pie">pie</label>
+        <label><input type="radio" name="charttype" value="histogram">histogram</label>
+      </div>
+    </div>
+    <canvas id="chart" height="220"></canvas>
+    <p class="muted" id="chartHint" style="margin-top:8px"></p>
+  </div>
+</div>
+
+<!-- KPI -->
+<div class="grid cols-2">
+  <div class="card kpi"><div class="k-label">평균 T-margin</div><div class="k-val" id="kpiT">–<small>UI</small></div></div>
+  <div class="card kpi"><div class="k-label">Pass rate</div><div class="k-val" id="kpiP">–<small>%</small></div></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const DATA = {{ chart_json | safe }};
+const S = (DATA.scatter || []).filter(p => p.x != null && p.y != null);
+const EYE_COLORS = {Upper:"#3b82f6", Middle:"#0f9d8f", Lower:"#a855f7"};
+const FAIL_W = 0.24, FAIL_H = 50, RED = "#e5484d";
+Chart.defaults.color = "#64748b";
+Chart.defaults.borderColor = "#e2e8f0";
+const el = document.getElementById("chart");
+const hint = document.getElementById("chartHint");
+let chart = null;
+const destroy = () => { if (chart) { chart.destroy(); chart = null; } };
+
+function quart(vals) {
+  const a = [...vals].sort((x, y) => x - y), n = a.length;
+  if (!n) return null;
+  const q = p => { const i = (n - 1) * p, lo = Math.floor(i), hi = Math.ceil(i); return a[lo] + (a[hi] - a[lo]) * (i - lo); };
+  return {min: a[0], q1: q(.25), med: q(.5), q3: q(.75), max: a[n - 1]};
+}
+const byEye = () => {
+  const g = {Upper: [], Middle: [], Lower: []};
+  S.forEach(p => { (g[p.eye] || (g[p.eye] = [])).push(p.x); });
+  return g;
+};
+
+// KPI
+(function () {
+  if (!S.length) return;
+  const meanT = S.reduce((s, p) => s + p.x, 0) / S.length;
+  const pass = S.filter(p => p.pass).length;
+  document.getElementById("kpiT").innerHTML = meanT.toFixed(2) + '<small>UI</small>';
+  document.getElementById("kpiP").innerHTML = Math.round(pass / S.length * 100) + '<small>%</small>';
+})();
+
+const failZone = {
+  id: "failZone",
+  beforeDatasetsDraw(c) {
+    const {ctx, chartArea: a, scales: {x, y}} = c;
+    ctx.save(); ctx.fillStyle = "rgba(229,72,77,0.09)";
+    const xF = Math.min(x.getPixelForValue(FAIL_W), a.right);
+    const yF = Math.max(y.getPixelForValue(FAIL_H), a.top);
+    ctx.fillRect(a.left, a.top, xF - a.left, a.bottom - a.top);
+    ctx.fillRect(a.left, yF, a.right - a.left, a.bottom - yF);
+    ctx.strokeStyle = RED; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(xF, a.top); ctx.lineTo(xF, a.bottom); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(a.left, yF); ctx.lineTo(a.right, yF); ctx.stroke();
+    ctx.restore();
+  }
+};
+
+function renderScatter() {
+  const groups = {};
+  S.forEach(p => { const k = `${p.eye} ${p.lane}`; (groups[k] || (groups[k] = [])).push(p); });
+  const datasets = Object.entries(groups).map(([label, pts]) => ({
+    label, data: pts, backgroundColor: EYE_COLORS[pts[0].eye] || "#0f9d8f",
+    pointRadius: pts.map(p => p.pass ? 4 : 6),
+    pointBorderColor: pts.map(p => p.pass ? "transparent" : RED),
+    pointBorderWidth: pts.map(p => p.pass ? 0 : 2),
+  }));
+  chart = new Chart(el, {type: "scatter", data: {datasets},
+    options: {plugins: {legend: {labels: {usePointStyle: true, boxWidth: 8}},
+      tooltip: {callbacks: {label: c => `${c.dataset.label}: W=${c.raw.x.toFixed(3)}UI, H=${c.raw.y.toFixed(1)}mV ${c.raw.pass ? "PASS" : "FAIL"}`}}},
+      scales: {x: {title: {display: true, text: "Eye Width (UI)"}, min: 0}, y: {title: {display: true, text: "Eye Height (mV)"}, min: 0}}},
+    plugins: [failZone]});
+  hint.textContent = "W/H 분포 · Fail zone: W ≤ 0.24 UI 또는 H ≤ 50 mV";
+}
+
+function renderHistogram() {
+  const vals = S.map(p => p.x);
+  if (!vals.length) { hint.textContent = "데이터 없음"; return; }
+  const lo = Math.min(...vals), hi = Math.max(...vals), bins = 10;
+  const w = (hi - lo) / bins || 1, counts = Array(bins).fill(0);
+  vals.forEach(v => { let i = Math.floor((v - lo) / w); if (i >= bins) i = bins - 1; if (i < 0) i = 0; counts[i]++; });
+  const labels = counts.map((_, i) => (lo + i * w).toFixed(2));
+  chart = new Chart(el, {type: "bar", data: {labels, datasets: [{label: "count", data: counts, backgroundColor: "#0f9d8f"}]},
+    options: {plugins: {legend: {display: false}}, scales: {x: {title: {display: true, text: "Eye Width (UI)"}}, y: {title: {display: true, text: "빈도"}, beginAtZero: true}}}});
+  hint.textContent = "Eye Width(UI) 분포 히스토그램 (10 bins)";
+}
+
+function renderPie() {
+  const pass = S.filter(p => p.pass).length, fail = S.length - pass;
+  chart = new Chart(el, {type: "pie", data: {labels: ["PASS", "FAIL"], datasets: [{data: [pass, fail], backgroundColor: ["#12805c", "#e5484d"]}]},
+    options: {plugins: {legend: {position: "right"}}}});
+  hint.textContent = `PASS/FAIL 비율 · 총 ${S.length}건`;
+}
+
+const boxWhisker = {
+  id: "boxWhisker",
+  afterDatasetsDraw(c) {
+    const meta = c.getDatasetMeta(0), {ctx} = c, y = c.scales.y;
+    ctx.save(); ctx.strokeStyle = "#12233b"; ctx.lineWidth = 1.5;
+    meta.data.forEach((bar, i) => {
+      const st = c.$boxStats[i]; if (!st) return;
+      const x = bar.x, hw = bar.width / 2;
+      const py = v => y.getPixelForValue(v);
+      ctx.beginPath();  // whisker min-max
+      ctx.moveTo(x, py(st.min)); ctx.lineTo(x, py(st.q1));
+      ctx.moveTo(x, py(st.q3)); ctx.lineTo(x, py(st.max));
+      ctx.moveTo(x - hw * .5, py(st.min)); ctx.lineTo(x + hw * .5, py(st.min));
+      ctx.moveTo(x - hw * .5, py(st.max)); ctx.lineTo(x + hw * .5, py(st.max));
+      ctx.stroke();
+      ctx.beginPath(); ctx.lineWidth = 2;  // median
+      ctx.moveTo(x - hw, py(st.med)); ctx.lineTo(x + hw, py(st.med)); ctx.stroke();
+      ctx.lineWidth = 1.5;
+    });
+    ctx.restore();
+  }
+};
+
+function renderBox() {
+  const g = byEye(), labels = [], data = [], stats = [], colors = [];
+  ["Upper", "Middle", "Lower"].forEach(eye => {
+    const st = quart(g[eye] || []); if (!st) return;
+    labels.push(eye); data.push([st.q1, st.q3]); stats.push(st); colors.push(EYE_COLORS[eye] + "aa");
+  });
+  if (!labels.length) { hint.textContent = "데이터 없음"; return; }
+  chart = new Chart(el, {type: "bar", data: {labels, datasets: [{label: "IQR", data, backgroundColor: colors, borderColor: "#12233b", borderWidth: 1, barPercentage: 0.5}]},
+    options: {plugins: {legend: {display: false},
+      tooltip: {callbacks: {label: c => { const s = stats[c.dataIndex]; return `min ${s.min.toFixed(2)} · Q1 ${s.q1.toFixed(2)} · med ${s.med.toFixed(2)} · Q3 ${s.q3.toFixed(2)} · max ${s.max.toFixed(2)}`; }}}},
+      scales: {y: {title: {display: true, text: "Eye Width (UI)"}, beginAtZero: true}}},
+    plugins: [boxWhisker]});
+  chart.$boxStats = stats;
+  chart.update();
+  hint.textContent = "Eye Width(UI) Box plot · Eye 영역별 (min/Q1/median/Q3/max)";
+}
+
+const R = {scatter: renderScatter, histogram: renderHistogram, pie: renderPie, box: renderBox};
+function show(t) { destroy(); (R[t] || renderScatter)(); }
+document.querySelectorAll('input[name=charttype]').forEach(i => i.addEventListener("change", () => show(i.value)));
+if (!S.length) { hint.textContent = "표시할 데이터가 없습니다. 먼저 EOM 변환을 실행하세요."; }
+else { show("scatter"); }
+</script>
+{% endblock %}

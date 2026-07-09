@@ -2,22 +2,28 @@
 PAM4 EOM Agent - Web Frontend (FastAPI)
 Python 3.12.13 / Langflow 1.9.1 연동
 
-  /            첫 화면 (메뉴 2개)
-  /upload      EOM log 업로드 → Langflow flow 실행 → 최신 run 결과 표시
-  /results     eom_results 조회 + 비교 차트 (A: W/H 산점도, B: run 추이)
+사이드바 워크스페이스 구조 (EOM_Agent_Frontend 설계 반영):
+  /            → /convert 로 리다이렉트
+  /convert     SCREEN 01 · EOM 변환 (업로드 → flow 실행 → Eye·Margin 결과)
+  /analysis    SCREEN 02 · DB 분석 (검색/필터 + 테이블 + 차트 4종 + KPI)
+  /analysis/export  결과 CSV 내보내기
+  /upload,/results  하위호환 리다이렉트
 
 실행:
   export LANGFLOW_URL=http://localhost:7860
   export EOM_FLOW_ID=<Langflow에서 조립한 flow의 ID>
   uvicorn frontend.main:app --reload --port 8000  (프로젝트 루트에서)
 """
+import csv
+import io
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -116,28 +122,31 @@ async def run_langflow_flow(file_path: str, model: str) -> dict:
         return resp.json()
 
 
-# ---------- 첫 화면 ----------
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+# ---------- 진입: 워크스페이스 기본 화면 ----------
+@app.get("/")
+async def index():
+    return RedirectResponse(url="/convert", status_code=307)
 
 
-# ---------- 메뉴 1: 업로드 → flow 실행 ----------
-@app.get("/upload", response_class=HTMLResponse)
-async def upload_page(request: Request):
-    return templates.TemplateResponse("upload.html", {"request": request})
+# ---------- SCREEN 01 · EOM 변환 ----------
+@app.get("/convert", response_class=HTMLResponse)
+async def convert_page(request: Request):
+    return templates.TemplateResponse(
+        "convert.html", {"request": request, "active": "convert"})
 
 
-@app.post("/upload", response_class=HTMLResponse)
-async def upload_log(request: Request,
-                     file: UploadFile = File(...),
-                     model: str = Form("claude")):
+@app.post("/convert", response_class=HTMLResponse)
+async def convert_run(request: Request,
+                      file: UploadFile = File(...),
+                      model: str = Form("claude"),
+                      output: str = Form("json")):
     (STORAGE / "uploads").mkdir(parents=True, exist_ok=True)
     safe_name = Path(file.filename or "eom_log.txt").name  # 경로 탈출 방지
     dest = STORAGE / "uploads" / safe_name
     dest.write_bytes(await file.read())
 
-    ctx: dict = {"request": request, "filename": safe_name, "model": model}
+    ctx: dict = {"request": request, "active": "convert",
+                 "filename": safe_name, "model": model, "output": output}
     try:
         await run_langflow_flow(str(dest), model)
         # flow가 DB/이미지를 생성하므로, 최신 run을 DB에서 재조회해 표시
@@ -151,18 +160,50 @@ async def upload_log(request: Request,
     except FlowRunError as e:
         # ③ JSON Builder의 파싱 진단 등 Langflow 오류를 그대로 화면에 표시
         ctx["error"] = str(e)
-    return templates.TemplateResponse("upload.html", ctx)
+    return templates.TemplateResponse("convert.html", ctx)
 
 
-# ---------- 메뉴 2: 결과 조회 + 비교 차트 ----------
-@app.get("/results", response_class=HTMLResponse)
-async def results_page(request: Request, filename: str = "",
-                       lane: str = "", eye: str = "", limit: int = 300):
-    rows = query_results(DB_PATH, filename=filename, lane=lane,
-                         eye=eye, limit=limit)
+# ---------- SCREEN 02 · DB 분석 ----------
+@app.get("/analysis", response_class=HTMLResponse)
+async def analysis_page(request: Request, filename: str = "",
+                        lane: str = "", eye: str = "", limit: int = 300):
+    rows = query_results(DB_PATH, filename=filename, lane=lane, eye=eye, limit=limit)
     chart = build_chart_data(rows)
-    return templates.TemplateResponse("results.html", {
-        "request": request, "rows": rows,
+    qs = {k: v for k, v in
+          {"filename": filename, "lane": lane, "eye": eye}.items() if v}
+    return templates.TemplateResponse("analysis.html", {
+        "request": request, "active": "analysis", "rows": rows,
         "chart_json": json.dumps(chart, ensure_ascii=False),
         "f_filename": filename, "f_lane": lane, "f_eye": eye,
+        "query_string": ("?" + urlencode(qs)) if qs else "",
     })
+
+
+@app.get("/analysis/export")
+async def analysis_export(filename: str = "", lane: str = "", eye: str = "",
+                          limit: int = 5000):
+    rows = query_results(DB_PATH, filename=filename, lane=lane, eye=eye, limit=limit)
+    cols = ["run_id", "filename", "model", "lane", "eye",
+            "center_x_ui", "center_y_mv", "width_ui", "height_mv",
+            "pass", "overall_pass", "params_complete", "created_at"]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(cols)
+    for r in rows:
+        w.writerow([r.get(c, "") for c in cols])
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=eom_results.csv"})
+
+
+# ---------- 하위호환 리다이렉트 ----------
+@app.get("/upload")
+async def _r_upload():
+    return RedirectResponse(url="/convert", status_code=308)
+
+
+@app.get("/results")
+async def _r_results(request: Request):
+    q = request.url.query
+    return RedirectResponse(url="/analysis" + (("?" + q) if q else ""), status_code=308)

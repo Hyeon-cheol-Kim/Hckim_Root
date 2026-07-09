@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}EOM 변환 — PAM4 EOM Agent{% endblock %}
+{% block crumb %}SCREEN 01 · EOM 변환{% endblock %}
+{% block heading %}로그를 넘기면 Eye · Margin까지{% endblock %}
+
+{% block body %}
+<div class="grid cols-2">
+  <!-- 좌: 변환 실행 -->
+  <div class="card">
+    <div class="tag">변환 실행</div>
+    <form action="/convert" method="post" enctype="multipart/form-data">
+      <div class="step-no">1 · EOM 로그 업로드</div>
+      <label class="dropzone" for="file">
+        파일을 끌어다 놓거나 클릭 · <strong>.log .txt</strong>
+        <input type="file" name="file" id="file" required
+               style="margin-top:10px" accept=".log,.txt,.csv">
+      </label>
+
+      <div class="step-no" style="margin-top:16px">2 · 파싱 모델</div>
+      <select name="model">
+        <option value="claude">Claude (Anthropic)</option>
+        <option value="openai">OpenAI</option>
+        <option value="ollama">로컬 (Ollama)</option>
+      </select>
+
+      <div class="step-no" style="margin-top:16px">3 · 출력 형식</div>
+      <div class="seg">
+        <label><input type="radio" name="output" value="json" checked>JSON</label>
+        <label><input type="radio" name="output" value="csv">CSV</label>
+      </div>
+
+      <p style="margin-top:18px"><button type="submit">변환 실행</button></p>
+    </form>
+  </div>
+
+  <!-- 우: 결과 프리뷰 -->
+  <div class="card">
+    <div class="tag">결과</div>
+    {% if error %}
+      <div class="alert err" style="margin-top:10px">{{ error }}</div>
+    {% elif rows %}
+      <h2 style="margin-top:8px">Eye Diagram · Margin — run {{ run_id }}</h2>
+      {% for img in images %}
+        <p style="margin:10px 0"><img class="eye" src="/{{ img }}" alt="eye diagram"></p>
+      {% endfor %}
+      <table style="margin-top:8px">
+        <thead><tr><th>Lane</th><th>Eye</th><th>Timing (UI)</th><th>Voltage (mV)</th><th>상태</th></tr></thead>
+        <tbody>
+        {% for r in rows %}
+          <tr class="{{ 'row-fail' if not r['pass'] }}">
+            <td>{{ r.lane }}</td><td>{{ r.eye }}</td>
+            <td>{{ "%.4f"|format(r.width_ui) }}</td>
+            <td>{{ "%.1f"|format(r.height_mv) }}</td>
+            <td class="{{ 'pass' if r['pass'] else 'fail' }}">{{ 'PASS' if r['pass'] else 'FAIL' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p style="margin-top:14px"><a class="btn ghost" href="/analysis">DB 분석에서 비교 →</a></p>
+    {% else %}
+      <p class="muted" style="margin-top:10px">
+        로그를 업로드하면 Eye Diagram(0=open/≥1=error)과 3-eye Margin(PASS/FAIL)이 여기에 표시됩니다.
+      </p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
